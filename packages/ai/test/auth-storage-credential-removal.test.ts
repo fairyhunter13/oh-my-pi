@@ -155,4 +155,40 @@ describe("AuthStorage OAuth login keeps an existing API key row enabled", () => 
 			authStorage.close();
 		}
 	});
+
+	test("logging in again to a removed account revives its row: same id, name, default, and a pin on it serves", async () => {
+		registerOAuthProvider({
+			id: "unit-removal-login",
+			name: "Unit Removal Login",
+			sourceId: SOURCE_ID,
+			login: async () => oauthCredential("login"),
+			refreshToken: async () => oauthCredential("login"),
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
+		try {
+			const first = await authStorage.oauth.login("unit-removal-login", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+			const id = first?.credentialId;
+			if (id === undefined) throw new Error("login returned no row id");
+			authStorage.renameCredential(id, "work");
+			authStorage.setDefaultCredential("unit-removal-login", id);
+			expect(authStorage.pinSessionCredential("unit-removal-login", "s-other", id)).toBe(true);
+			expect(await authStorage.removeCredential("unit-removal-login", id)).toBe(true);
+
+			const again = await authStorage.oauth.login("unit-removal-login", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+			expect(again?.credentialId).toBe(id);
+			const row = authStorage.listCredentials("unit-removal-login").find(candidate => candidate.id === id);
+			expect(row?.label).toBe("work");
+			expect(row?.isDefault).toBe(true);
+			expect(row?.disabled).toBeNull();
+			await expect(authStorage.keys.get("unit-removal-login", "s-other")).resolves.toBe("access-login");
+		} finally {
+			authStorage.close();
+		}
+	});
 });
