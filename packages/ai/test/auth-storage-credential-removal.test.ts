@@ -191,4 +191,32 @@ describe("AuthStorage OAuth login keeps an existing API key row enabled", () => 
 			authStorage.close();
 		}
 	});
+
+	test("logging in again after a failed refresh disabled the row revives it, so pins on that id keep serving", async () => {
+		registerOAuthProvider({
+			id: "unit-refresh-failed-login",
+			name: "Unit Refresh Failed Login",
+			sourceId: SOURCE_ID,
+			login: async () => oauthCredential("relogin"),
+			refreshToken: async () => oauthCredential("relogin"),
+		});
+		const controller = { onAuth: () => {}, onPrompt: async () => "" };
+		const authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
+		try {
+			const first = await authStorage.oauth.login("unit-refresh-failed-login", controller);
+			const id = first?.credentialId;
+			if (id === undefined) throw new Error("login returned no row id");
+			expect(authStorage.pinSessionCredential("unit-refresh-failed-login", "s-old", id)).toBe(true);
+			authStorage.disableCredentialById(id, "oauth refresh failed: 400 invalid_grant");
+
+			const again = await authStorage.oauth.login("unit-refresh-failed-login", controller);
+			expect(again?.credentialId).toBe(id);
+			const rows = authStorage.listCredentials("unit-refresh-failed-login");
+			expect(rows.map(row => row.id)).toEqual([id]);
+			expect(rows[0]?.disabled).toBeNull();
+			await expect(authStorage.keys.get("unit-refresh-failed-login", "s-old")).resolves.toBe("access-relogin");
+		} finally {
+			authStorage.close();
+		}
+	});
 });

@@ -36,7 +36,6 @@ import type {
 	UsageHistoryQuery,
 } from "../usage";
 import {
-	DELETED_BY_USER_CAUSE,
 	ensureCredentialCatalogColumns,
 	isPurgeableApiKeyCause,
 	migrateAuthSchemaV8ToV9,
@@ -1355,10 +1354,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				this.#deleteStmt.run("replaced by newer credential", row.id);
 			}
 
-			// ccw: logging in again to an account the user removed brings its row back, so its id,
-			// name, default and every pin or binding that names it keep working.
+			// ccw: logging in again to an account that was removed, or disabled by a failed refresh,
+			// brings its row back, so its id, name, default and every pin or binding that names it keep working.
 			if (targetId === null) {
-				targetId = this.#reviveRemovedRow(providerName, item, serialized);
+				targetId = this.#reviveSupersededRow(providerName, item, serialized);
 			}
 
 			if (targetId === null) {
@@ -1386,10 +1385,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result;
 	}
 
-	/** The newest removal tombstone of the same credential, revived in place; null when none. */
-	#reviveRemovedRow(provider: string, item: AuthCredential, serialized: SerializedCredentialRecord): number | null {
+	/**
+	 * The newest disabled row this credential supersedes, revived in place; null when none.
+	 * It is the row #purgeSupersededDisabledRows would otherwise hard-delete, whatever disabled it.
+	 */
+	#reviveSupersededRow(provider: string, item: AuthCredential, serialized: SerializedCredentialRecord): number | null {
 		const removed = (this.#listDisabledByProviderStmt.all(provider) as AuthRow[])
-			.filter(row => row.disabled_cause === DELETED_BY_USER_CAUSE)
 			.filter(row =>
 				matchesReplacementCredential(provider, deserializeCredential(row), resolveRowCredentialIdentityKey(provider, row), item),
 			);
