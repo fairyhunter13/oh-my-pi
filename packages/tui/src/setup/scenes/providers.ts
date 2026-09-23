@@ -1,6 +1,7 @@
 import { type SgrMouseEvent } from "../../mouse";
 import { TabBar } from "../../components/tab-bar";
 import { getTabBarTheme } from "../../chrome/shared";
+import { CredentialsTab } from "./credentials";
 import { SignInTab } from "./sign-in";
 import type { SetupScene, SetupSceneController, SetupSceneHost, SetupTab } from "./types";
 import { WebSearchTab } from "./web-search";
@@ -21,7 +22,7 @@ class ProvidersSceneController implements SetupSceneController {
 	#tabRowCount = 1;
 
 	constructor(host: SetupSceneHost) {
-		this.#tabs = [new SignInTab(host), new WebSearchTab(host)];
+		this.#tabs = [new SignInTab(host), new WebSearchTab(host), new CredentialsTab(host)];
 		this.#tabBar = new TabBar(
 			"Providers",
 			this.#tabs.map(tab => ({ id: tab.id, label: tab.label })),

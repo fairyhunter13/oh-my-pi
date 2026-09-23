@@ -24,6 +24,8 @@ export interface SetupHost extends SetupUiHost {
 	readonly webSearchOrder: readonly string[];
 	readonly disabledProviders: readonly string[];
 	readonly authStorage: AuthStorage;
+	/** The running session, so the Credentials tab can pin a credential to it. */
+	readonly sessionId?: string;
 	readonly modelSource: ModelBrowserSource;
 	getModels(): { available: Model[]; all: Model[]; current: Model | undefined };
 	refreshModels(): Promise<void>;

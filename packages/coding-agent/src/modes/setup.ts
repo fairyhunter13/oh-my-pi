@@ -111,6 +111,9 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		get authStorage() {
 			return ctx.session.modelRegistry.authStorage;
 		},
+		get sessionId() {
+			return ctx.session.sessionId;
+		},
 		modelSource,
 		getModels: () => ({
 			available: ctx.session.modelRegistry.getAvailable(),
