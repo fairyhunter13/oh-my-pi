@@ -874,6 +874,12 @@ export interface KeysApi {
 	 */
 	keyless(provider: string): boolean;
 	/**
+	 * True while the models.yml key is the only key a request of `provider` can send:
+	 * no runtime key and no usable stored row, so no default or session pin applies.
+	 * `authHeader: true` derives its bearer from the config key only in that case.
+	 */
+	configKeyIsSoleSource(provider: string): boolean;
+	/**
 	 * Describe where the active credential for a provider came from.
 	 *
 	 * Mirrors {@link AuthStorage.keys.get} precedence, highest first:

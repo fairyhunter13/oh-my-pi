@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { DELETED_BY_USER_CAUSE } from "./credential-catalog";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
 import type { AccountPolicies } from "./policy";
@@ -631,19 +632,33 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	/**
-	 * Remove one stored credential for a provider.
+	 * Remove one stored credential for a provider. The store, not the in-memory
+	 * pool, decides what exists: a disabled row left the pool on disable, so it
+	 * becomes a tombstone through the catalog. A tombstone, a missing id or a row
+	 * of another provider returns false.
 	 */
 	async removeById(provider: string, credentialId: number): Promise<boolean> {
-		const entries = this.entries(provider);
-		const index = entries.findIndex(entry => entry.id === credentialId);
-		if (index === -1) return false;
+		let entries = this.entries(provider);
+		let index = entries.findIndex(entry => entry.id === credentialId);
+		if (index === -1) {
+			this.reloadProvider(provider);
+			entries = this.entries(provider);
+			index = entries.findIndex(entry => entry.id === credentialId);
+		}
+		if (index === -1) {
+			// The catalog hides tombstones, so only a disabled live row gets here.
+			const catalog = this.#store.credentialCatalog;
+			const row = catalog?.get(credentialId);
+			if (!catalog || row?.provider !== provider || row.disabled_cause === null) return false;
+			return catalog.markDeleted(credentialId, DELETED_BY_USER_CAUSE);
+		}
 		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
 		this.#options.policies.validateFor(
 			provider,
 			remainingEntries.map(entry => entry.credential),
 		);
 
-		const deleted = await this.#store.deleteAuthCredential(credentialId, "deleted by user");
+		const deleted = await this.#store.deleteAuthCredential(credentialId, DELETED_BY_USER_CAUSE);
 		if (!deleted) return false;
 		this.replace(provider, remainingEntries);
 		this.reset(provider);

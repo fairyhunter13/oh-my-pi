@@ -397,6 +397,16 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * `authHeader: true` derives `Authorization: Bearer <config key>`, and transports
+	 * send that header over the key they resolved. Derive it only while the config key
+	 * is the provider's sole source, so a stored row, a session pin or a runtime key is
+	 * what reaches the wire.
+	 */
+	#authHeaderApplies(provider: string): () => boolean {
+		return () => this.authStorage.keys.configKeyIsSoleSource(provider);
+	}
+
+	/**
 	 * @param authStorage - Auth storage for API key resolution
 	 *
 	 * Sync constructor — eagerly loads config (including migrations), cache
@@ -1688,6 +1698,7 @@ export class ModelRegistry {
 					model,
 					resolveProviderModelReference(model.provider, model.id, existingModels),
 					this.#providerOverrides.get(model.provider),
+					this.#authHeaderApplies(model.provider),
 				),
 			),
 		);
@@ -1857,6 +1868,7 @@ export class ModelRegistry {
 			? createConfigHeaderResolver([providerOverride?.headers], {
 					authHeader: providerOverride?.authHeader,
 					apiKeyConfig: providerOverride?.apiKey,
+					authHeaderApplies: this.#authHeaderApplies(providerId),
 				})
 			: undefined;
 		const manager = createModelManager<Api>({
@@ -2293,6 +2305,7 @@ export class ModelRegistry {
 	}
 	#applyProviderTransportOverride<
 		T extends {
+			provider: string;
 			api: Api;
 			baseUrl?: string;
 			headers?: Record<string, string>;
@@ -2315,6 +2328,7 @@ export class ModelRegistry {
 						: [entry.resolveHeaders ?? entry.headers],
 					override.authHeader,
 					override.apiKey,
+					this.#authHeaderApplies(entry.provider),
 				)
 			: entry.resolveHeaders;
 		return {
@@ -2517,6 +2531,7 @@ export class ModelRegistry {
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
 					providerConfig.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					this.#authHeaderApplies(providerName),
 				);
 				if (!model) continue;
 				models.push(model);
@@ -3054,6 +3069,7 @@ export class ModelRegistry {
 					undefined,
 					config.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					this.#authHeaderApplies(providerName),
 				);
 				if (!overlay) {
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
@@ -3145,6 +3161,7 @@ export class ModelRegistry {
 							undefined,
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
+							this.#authHeaderApplies(providerName),
 						);
 						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}

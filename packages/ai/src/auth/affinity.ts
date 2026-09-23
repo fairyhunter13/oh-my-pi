@@ -181,9 +181,7 @@ export class SessionAffinity implements SessionsApi {
 		const oauthCredentials = allCredentials.filter((c): c is OAuthCredential => c.type === "oauth");
 		if (oauthCredentials.length === 0) return undefined;
 
-		// Runtime / config overrides bypass OAuth account_uuid attribution — the
-		// caller is authenticating with an explicit key, not the broker's OAuth.
-		if (this.#overrides.has(provider)) return undefined;
+		if (this.overridden(provider, sessionId)) return undefined;
 
 		// Prefer the session-sticky credential when available.
 		const sessionPref = this.get(provider, sessionId);
@@ -219,7 +217,7 @@ export class SessionAffinity implements SessionsApi {
 	 * account, a stale resume re-ranks.
 	 */
 	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean {
-		if (!sessionId || this.#overrides.has(provider)) {
+		if (!sessionId || this.#overrides.hasRuntime(provider)) {
 			return false;
 		}
 		const stored = this.#pool.entries(provider);
@@ -236,10 +234,11 @@ export class SessionAffinity implements SessionsApi {
 	 * Strict pin on one stored row, OAuth or API key: only that row serves the
 	 * session. Ranking, reserve, idle warmth, rate-limit blocks and auth retry
 	 * never route around it, and a disabled or deleted row fails the request.
-	 * Returns false for a missing row or an overridden provider.
+	 * Returns false for a missing row or a runtime override. A config apiKey does
+	 * not refuse the pin: the pin beats it for this session.
 	 */
 	pinStrict(provider: string, sessionId: string, credentialId: number): boolean {
-		if (!sessionId || this.#overrides.has(provider)) return false;
+		if (!sessionId || this.#overrides.hasRuntime(provider)) return false;
 		this.#pool.reloadProvider(provider);
 		const stored = this.#pool.entries(provider);
 		const index = stored.findIndex(entry => entry.id === credentialId);
@@ -265,6 +264,16 @@ export class SessionAffinity implements SessionsApi {
 		}
 		this.#rememberStrictPin(provider, sessionId, id);
 		return id ?? undefined;
+	}
+
+	/**
+	 * Runtime / config overrides bypass OAuth account_uuid attribution — the
+	 * caller authenticates with an explicit key, not the broker's OAuth. A strict
+	 * session pin beats a config key, so it keeps the stored credentials.
+	 */
+	overridden(provider: string, sessionId: string | undefined): boolean {
+		if (this.#overrides.hasRuntime(provider)) return true;
+		return this.#overrides.configCounts(provider) && this.strictPin(provider, sessionId) === undefined;
 	}
 
 	/** Drop the session's strict pin; the session returns to the default and the pool. */

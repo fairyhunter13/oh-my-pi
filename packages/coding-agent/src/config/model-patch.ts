@@ -85,6 +85,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 		ProviderOverride,
 		"baseUrl" | "baseUrlApis" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
 	>,
+	authHeaderApplies?: () => boolean,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
@@ -101,6 +102,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				{
 					authHeader: providerOverride?.authHeader,
 					apiKeyConfig: providerOverride?.apiKey,
+					authHeaderApplies,
 				},
 			),
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
@@ -120,6 +122,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			resolveHeaders: createConfigHeaderResolver([model.resolveHeaders ?? model.headers, providerOverride.headers], {
 				authHeader: providerOverride.authHeader,
 				apiKeyConfig: providerOverride.apiKey,
+				authHeaderApplies,
 			}),
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			remoteCompaction: mergeProviderRemoteCompactionConfig(

@@ -33,7 +33,7 @@ export interface CredentialSummary {
 	pinned: boolean;
 }
 
-/** Raw catalog row: every column the summary needs, disabled rows included. */
+/** Raw catalog row: every column the summary needs, disabled rows included, tombstones left out. */
 export interface CredentialCatalogRow {
 	id: number;
 	provider: string;
@@ -56,10 +56,15 @@ export interface CredentialCatalog {
 	defaultId(provider: string): number | undefined;
 	/** Clear disabled_cause; returns the row's provider, or undefined when no disabled row matched. */
 	enable(id: number): string | undefined;
+	/** Set a disabled row's cause to `cause`; false when no disabled row has this id. */
+	markDeleted(id: number, cause: string): boolean;
 }
 
 /** Cause upstream `login()` writes on api_key rows when an OAuth subscription lands. */
 export const OAUTH_LOGIN_REPLACED_CAUSE = "replaced by oauth login";
+
+/** Cause of a removed row. The catalog treats such a tombstone as missing. */
+export const DELETED_BY_USER_CAUSE = "deleted by user";
 
 /**
  * Schema V8 → V9: `label` and `is_default`. Idempotent, because a fresh database
@@ -95,6 +100,7 @@ function normalizeLabel(label: string | null | undefined): string | null {
 }
 
 const CATALOG_COLUMNS = "id, provider, credential_type, data, disabled_cause, label, is_default";
+const NOT_TOMBSTONE = `disabled_cause IS NOT '${DELETED_BY_USER_CAUSE}'`;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 /** SQLite implementation over the store's own connection. */
@@ -108,11 +114,13 @@ export class SqliteCredentialCatalog implements CredentialCatalog {
 
 	constructor(db: Database) {
 		this.#db = db;
-		this.#listAll = db.prepare(`SELECT ${CATALOG_COLUMNS} FROM auth_credentials ORDER BY provider ASC, id ASC`);
-		this.#listByProvider = db.prepare(
-			`SELECT ${CATALOG_COLUMNS} FROM auth_credentials WHERE provider = ? ORDER BY id ASC`,
+		this.#listAll = db.prepare(
+			`SELECT ${CATALOG_COLUMNS} FROM auth_credentials WHERE ${NOT_TOMBSTONE} ORDER BY provider ASC, id ASC`,
 		);
-		this.#getById = db.prepare(`SELECT ${CATALOG_COLUMNS} FROM auth_credentials WHERE id = ?`);
+		this.#listByProvider = db.prepare(
+			`SELECT ${CATALOG_COLUMNS} FROM auth_credentials WHERE provider = ? AND ${NOT_TOMBSTONE} ORDER BY id ASC`,
+		);
+		this.#getById = db.prepare(`SELECT ${CATALOG_COLUMNS} FROM auth_credentials WHERE id = ? AND ${NOT_TOMBSTONE}`);
 		this.#defaultByProvider = db.prepare(
 			"SELECT id FROM auth_credentials WHERE provider = ? AND is_default = 1 AND disabled_cause IS NULL ORDER BY id ASC LIMIT 1",
 		);
@@ -201,10 +209,18 @@ export class SqliteCredentialCatalog implements CredentialCatalog {
 		const row = this.get(id);
 		if (!row || row.disabled_cause === null) return undefined;
 		this.#db.run(
-			`UPDATE auth_credentials SET disabled_cause = NULL, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NOT NULL`,
+			`UPDATE auth_credentials SET disabled_cause = NULL, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NOT NULL AND ${NOT_TOMBSTONE}`,
 			[id],
 		);
 		return row.provider;
+	}
+
+	markDeleted(id: number, cause: string): boolean {
+		const result = this.#db.run(
+			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NOT NULL AND ${NOT_TOMBSTONE}`,
+			[cause, id],
+		);
+		return result.changes > 0;
 	}
 }
 

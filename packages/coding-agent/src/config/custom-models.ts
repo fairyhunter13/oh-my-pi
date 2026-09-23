@@ -36,16 +36,18 @@ function mergeCustomModelHeaders(
 	modelHeaders: Record<string, string> | undefined,
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
+	authHeaderApplies: (() => boolean) | undefined,
 ): ConfigHeaderResolver | undefined {
-	return createConfigHeaderResolver([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
+	return createConfigHeaderResolver([providerHeaders, modelHeaders], { authHeader, apiKeyConfig, authHeaderApplies });
 }
 
 export function mergeAuthHeaderSources(
 	sources: readonly ConfigHeaderSource[],
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
+	authHeaderApplies?: () => boolean,
 ): ConfigHeaderResolver | undefined {
-	return createConfigHeaderResolver(sources, { authHeader, apiKeyConfig });
+	return createConfigHeaderResolver(sources, { authHeader, apiKeyConfig, authHeaderApplies });
 }
 
 /**
@@ -73,6 +75,7 @@ export function buildCustomModelOverlay(
 	providerAuth: ProviderAuthMode | undefined,
 	providerRemoteCompaction: RemoteCompactionConfig<Api> | undefined,
 	modelDef: CustomModelDefinitionLike,
+	authHeaderApplies?: () => boolean,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
 	if (!api) return undefined;
@@ -94,7 +97,13 @@ export function buildCustomModelOverlay(
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
 		preferWebsockets: modelDef.preferWebsockets,
-		resolveHeaders: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
+		resolveHeaders: mergeCustomModelHeaders(
+			providerHeaders,
+			modelDef.headers,
+			authHeader,
+			providerApiKey,
+			authHeaderApplies,
+		),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,

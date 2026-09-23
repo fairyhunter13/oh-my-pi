@@ -133,8 +133,9 @@ export class OAuthAccounts implements OAuthApi {
 	async access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined> {
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be
-		// suppressed (same contract as account identity lookup).
-		if (this.#deps.overrides.has(provider)) {
+		// suppressed (same contract as account identity lookup). A strict session
+		// pin beats a config key.
+		if (this.#deps.affinity.overridden(provider, sessionId)) {
 			return undefined;
 		}
 		const resolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);

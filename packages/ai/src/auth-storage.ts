@@ -293,7 +293,7 @@ export class AuthStorage {
 
 	// ─── Credential catalog: /providers → Credentials (see ./auth/credential-catalog.ts) ───
 
-	/** Every stored credential, disabled rows included; `active` and `pinned` describe `sessionId`'s choice. */
+	/** Every stored credential, disabled rows included, removed rows left out; `active` and `pinned` describe `sessionId`'s choice. */
 	listCredentials(provider?: string, sessionId?: string): CredentialSummary[] {
 		const marksByProvider = new Map<string, { activeId?: number; pinnedId?: number }>();
 		return this.#catalog()
@@ -348,7 +348,7 @@ export class AuthStorage {
 		return this.#pool.disable(id, cause);
 	}
 
-	/** Disable one row of `provider` as "deleted by user"; the other rows stay. */
+	/** Remove one row of `provider`, active or disabled; the other rows stay. A removed row no longer lists. */
 	removeCredential(provider: string, id: number): Promise<boolean> {
 		return this.#pool.removeById(provider, id);
 	}
@@ -359,12 +359,17 @@ export class AuthStorage {
 		return catalog;
 	}
 
-	/** Only a user choice marks a row: the pin, else the default. Ranking and the sticky never do. */
+	/**
+	 * Only a user choice marks a row: the pin, else the default. Ranking and the sticky never do.
+	 * A runtime override marks nothing; a config key that counts hides the default, not the pin.
+	 */
 	#credentialMarks(provider: string, sessionId: string | undefined): { activeId?: number; pinnedId?: number } {
-		if (!sessionId || this.#overrides.has(provider)) return {};
+		if (!sessionId || this.#overrides.hasRuntime(provider)) return {};
+		const pinnedId = this.#affinity.strictPin(provider, sessionId);
+		if (pinnedId === undefined && this.#overrides.configCounts(provider)) return {};
 		return {
 			activeId: this.#affinity.preferred(provider, sessionId)?.credentialId,
-			pinnedId: this.#affinity.strictPin(provider, sessionId),
+			pinnedId,
 		};
 	}
 }

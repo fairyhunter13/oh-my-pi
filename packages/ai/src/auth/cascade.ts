@@ -19,6 +19,9 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 	return envValue || config;
 }
 
+/** A bare environment-variable name, e.g. `DEEPSEEK_API_KEY`. */
+const ENV_VAR_NAME = /^[A-Z_][A-Z0-9_]*$/;
+
 /** Runtime (--api-key) and config (models.yml) key overrides plus the config-value resolver. */
 export class KeyOverrides {
 	#runtimeOverrides: Map<string, string> = new Map();
@@ -29,8 +32,26 @@ export class KeyOverrides {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
 	}
 
+	/** A runtime override, or a config key that counts, replaces the stored credentials. */
 	has(provider: string): boolean {
-		return this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider);
+		return this.#runtimeOverrides.has(provider) || this.configCounts(provider);
+	}
+
+	hasRuntime(provider: string): boolean {
+		return this.#runtimeOverrides.has(provider);
+	}
+
+	/**
+	 * True when the provider's config apiKey can yield a secret. An empty value, or
+	 * an env-var name whose variable is unset, does not count: the resolver would
+	 * return the name itself. A `!command` counts until it runs.
+	 */
+	configCounts(provider: string): boolean {
+		const config = this.#configOverrides.get(provider);
+		if (config === undefined || !config.trim()) return false;
+		if (config.startsWith("!")) return true;
+		if (ENV_VAR_NAME.test(config)) return Boolean($envExact(config)?.trim());
+		return true;
 	}
 
 	runtimeKey(provider: string): string | undefined {
@@ -39,6 +60,13 @@ export class KeyOverrides {
 
 	configKey(provider: string): string | undefined {
 		return this.#configOverrides.get(provider);
+	}
+
+	/** The config key's secret when it counts and resolves to a non-empty value. */
+	async countedConfigValue(provider: string): Promise<string | undefined> {
+		if (!this.configCounts(provider)) return undefined;
+		const value = await this.#configValueResolver(this.#configOverrides.get(provider)!);
+		return value?.trim() ? value : undefined;
 	}
 
 	/** Resolve a config value (env var name, "!command", literal) to the secret. */
@@ -155,6 +183,14 @@ export class KeyCascade implements KeysApi {
 		return stored.length > 0 && stored.every(credential => this.isKeylessFallback(provider, credential));
 	}
 
+	configKeyIsSoleSource(provider: string): boolean {
+		return (
+			this.#deps.overrides.configKey(provider) !== undefined &&
+			this.#deps.overrides.runtimeKey(provider) === undefined &&
+			this.#getAuthBearingCredentials(provider).length === 0
+		);
+	}
+
 	/**
 	 * Env auth that belongs to this provider, not a cross-provider alias.
 	 * A declared OAuth token env list excludes borrowed API-key aliases from
@@ -219,10 +255,8 @@ export class KeyCascade implements KeysApi {
 			return runtimeKey;
 		}
 
-		const configKey = this.#deps.overrides.configKey(provider);
-		if (configKey !== undefined) {
-			return await this.#deps.overrides.resolve(configKey);
-		}
+		const configValue = await this.#deps.overrides.countedConfigValue(provider);
+		if (configValue) return configValue;
 
 		await this.#deps.pool.adoptExternalChanges();
 
@@ -263,7 +297,7 @@ export class KeyCascade implements KeysApi {
 		if (apiKeySelection) {
 			return this.#deps.overrides.resolve(apiKeySelection.credential.key);
 		}
-		return undefined;
+		return this.#uncountedConfigValue(provider);
 	}
 
 	/** Resolve a bearer together with the stored row that supplied it. */
@@ -281,8 +315,15 @@ export class KeyCascade implements KeysApi {
 
 	/**
 	 * Get API key for a provider.
-	 * Priority (first match wins): runtime override, config override, OAuth,
-	 * login API key, environment variable, then another stored API key.
+	 * Priority (first match wins):
+	 * 1. Runtime override (CLI --api-key)
+	 * 2. The session's strict pin (see {@link CredentialSelector.resolvePreferred})
+	 * 3. Config override (models.yml `providers.<name>.apiKey`) that resolves to a value
+	 * 4. The provider's default row, then OAuth token from storage (auto-refreshed)
+	 * 5. API key persisted by a successful `/login`
+	 * 6. Environment variable
+	 * 7. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
+	 * 8. A config key that did not count, returned as the resolver yields it
 	 */
 	async get(
 		provider: string,
@@ -300,10 +341,10 @@ export class KeyCascade implements KeysApi {
 		// OAuth credentials. The user redirected a provider at a custom baseUrl
 		// (e.g. an auth-gateway) and supplied the bearer for that endpoint —
 		// honor it instead of forwarding an upstream OAuth token that the proxy
-		// won't accept.
-		const configKey = this.#deps.overrides.configKey(provider);
-		if (configKey !== undefined) {
-			return this.#deps.overrides.resolve(configKey);
+		// won't accept. A strict session pin is a later, narrower choice and wins.
+		if (this.#deps.affinity.strictPin(provider, sessionId) === undefined) {
+			const configValue = await this.#deps.overrides.countedConfigValue(provider);
+			if (configValue) return configValue;
 		}
 		const preferred = await this.#deps.selector.resolvePreferred(provider, sessionId, options);
 		if (preferred?.type === "oauth") {
@@ -361,7 +402,13 @@ export class KeyCascade implements KeysApi {
 			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
 			return apiKey;
 		}
-		return undefined;
+		return this.#uncountedConfigValue(provider);
+	}
+
+	/** Last resort: with nothing stored, a config key that did not count resolves as it always did. */
+	async #uncountedConfigValue(provider: string): Promise<string | undefined> {
+		const configKey = this.#deps.overrides.configKey(provider);
+		return configKey === undefined ? undefined : await this.#deps.overrides.resolve(configKey);
 	}
 
 	/**

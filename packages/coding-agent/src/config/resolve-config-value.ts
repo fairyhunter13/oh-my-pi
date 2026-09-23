@@ -16,6 +16,12 @@ export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver |
 export interface ConfigHeaderResolutionOptions {
 	authHeader?: boolean;
 	apiKeyConfig?: string;
+	/**
+	 * Whether the config key is the key the request sends. When false, no bearer is
+	 * derived and the transport sends the key it resolved (a stored row, a session
+	 * pin, a runtime key). Omitted means true.
+	 */
+	authHeaderApplies?: () => boolean;
 }
 
 /** Identify command-backed values when collecting credentials that must be invalidated together. */
@@ -190,7 +196,7 @@ export function createConfigHeaderResolver(
 				hasResolved = true;
 			}
 		}
-		if (options?.authHeader && options.apiKeyConfig) {
+		if (options?.authHeader && options.apiKeyConfig && (options.authHeaderApplies?.() ?? true)) {
 			const keyConfig = options.apiKeyConfig;
 			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
 			if (apiKey) {
