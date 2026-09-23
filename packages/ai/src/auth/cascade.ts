@@ -305,6 +305,18 @@ export class KeyCascade implements KeysApi {
 		if (configKey !== undefined) {
 			return this.#deps.overrides.resolve(configKey);
 		}
+		const preferred = await this.#deps.selector.resolvePreferred(provider, sessionId, options);
+		if (preferred?.type === "oauth") {
+			if (preferred.resolved.credentialId !== undefined) onCredentialId?.(preferred.resolved.credentialId);
+			return preferred.resolved.apiKey;
+		}
+		if (preferred?.type === "api_key") {
+			this.#deps.affinity.record(provider, sessionId, "api_key", preferred.selection.index);
+			const credentialId = onCredentialId ? this.#deps.pool.entries(provider)[preferred.selection.index]?.id : undefined;
+			const apiKey = await this.#deps.overrides.resolve(preferred.selection.credential.key);
+			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
+			return apiKey;
+		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.

@@ -1033,9 +1033,9 @@ export interface SessionsApi {
 	 * Pin one stored OAuth account as this session's preferred credential.
 	 *
 	 * The durable credential id keeps the pin stable across credential refreshes,
-	 * storage reordering, and process restarts. By default this is an explicit
-	 * user pin: ranking and account reserve never evict it; hard unavailability
-	 * and auth retry may still route around it.
+	 * storage reordering, and process restarts. By default this is a strict
+	 * user pin: only this row serves the session, and ranking, reserve, idle
+	 * warmth, rate-limit blocks and auth retry never route around it.
 	 *
 	 * `options.restoredAtMs` instead restores an automatic affinity recorded by a
 	 * persisted session, backdated to its last use, so it keeps the provider's

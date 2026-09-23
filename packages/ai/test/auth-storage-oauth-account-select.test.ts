@@ -93,7 +93,7 @@ describe("AuthStorage OAuth account selection", () => {
 		);
 	});
 
-	test("inherited session affinity keeps usage rotation on the selected account", async () => {
+	test("an inherited strict pin keeps the child on the selected account through a usage limit", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");
 		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
@@ -116,12 +116,12 @@ describe("AuthStorage OAuth account selection", () => {
 		).toBe("b@example.com");
 
 		const outcome = await storage.limits.markReached(PROVIDER, "child-session", { retryAfterMs: 60_000 });
-		expect(outcome.switched).toBe(true);
+		expect(outcome.switched).toBe(false);
 		expect(
 			await withOAuthAccess(storage, PROVIDER, access => Promise.resolve(access.email), {
 				sessionId: "child-session",
 			}),
-		).toBe("a@example.com");
+		).toBe("b@example.com");
 	});
 
 	test("resolves the account at the requested position by ID and touches only that one", async () => {

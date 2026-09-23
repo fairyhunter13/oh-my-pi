@@ -111,8 +111,9 @@ describe("AuthStorage api-key login upsert", () => {
 			{ type: "api_key", key: "first-kagi-key", source: "login" },
 			{ type: "api_key", key: "second-kagi-key", source: "login" },
 		]);
-		const rotatedKeys = [await authStorage.keys.get("kagi"), await authStorage.keys.get("kagi")].sort();
-		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
+		// Several api_key rows resolve in id order: the first row serves until it is blocked.
+		const resolvedKeys = [await authStorage.keys.get("kagi"), await authStorage.keys.get("kagi")];
+		expect(resolvedKeys).toEqual(["first-kagi-key", "first-kagi-key"]);
 	});
 
 	it("replaces Token Plan Cookies by API-token identity without collapsing different tokens", async () => {

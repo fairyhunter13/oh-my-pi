@@ -22,6 +22,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { SessionAffinity } from "./auth/affinity";
 import { BlockStoreHealth, CredentialBlocks } from "./auth/blocks";
 import { KeyCascade, KeyOverrides } from "./auth/cascade";
+import { type CredentialCatalog, type CredentialSummary, summarizeCredentialRow } from "./auth/credential-catalog";
 import { CredentialHealth } from "./auth/health";
 import { OAuthAccounts } from "./auth/oauth";
 import { AccountPolicies } from "./auth/policy";
@@ -49,15 +50,18 @@ import type {
 } from "./auth/types";
 import { UsageService } from "./auth/usage";
 import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache";
+import * as AIError from "./error";
 import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+export type { CredentialSummary } from "./auth/credential-catalog";
 export * from "./auth/store";
 export * from "./auth/types";
 
 /** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
 interface AuthStorageModules {
+	store: AuthCredentialStore;
 	pool: CredentialPool;
 	keys: KeyCascade;
 	oauth: OAuthAccounts;
@@ -126,6 +130,17 @@ export class AuthStorage {
 	/** Persisted rate-limit blocks (auth-broker server seam). */
 	get blocks(): BlocksApi {
 		return this.#modules.blocks;
+	}
+
+	// The credential catalog methods below follow {@link AuthStorage.replaceStore} through these.
+	get #store(): AuthCredentialStore {
+		return this.#modules.store;
+	}
+	get #pool(): CredentialPool {
+		return this.#modules.pool;
+	}
+	get #affinity(): SessionAffinity {
+		return this.#modules.sessions;
 	}
 
 	/**
@@ -225,6 +240,7 @@ export class AuthStorage {
 		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
 
 		return {
+			store,
 			pool,
 			keys,
 			oauth,
@@ -273,5 +289,79 @@ export class AuthStorage {
 	 */
 	reload(): Promise<void> {
 		return this.credentials.reload();
+	}
+
+	// ─── Credential catalog: /providers → Credentials (see ./auth/credential-catalog.ts) ───
+
+	/** Every stored credential, disabled rows included; `active` marks what `sessionId` resolves to. */
+	listCredentials(provider?: string, sessionId?: string): CredentialSummary[] {
+		const activeByProvider = new Map<string, number | undefined>();
+		return this.#catalog()
+			.list(provider)
+			.map(row => {
+				if (!activeByProvider.has(row.provider)) {
+					activeByProvider.set(row.provider, this.#activeCredentialId(row.provider, sessionId));
+				}
+				return summarizeCredentialRow(row, activeByProvider.get(row.provider));
+			});
+	}
+
+	/** Store one more API key for `provider`; other rows stay. Returns the row id. */
+	addApiKey(provider: string, key: string, label?: string | null): number {
+		const id = this.#catalog().insertApiKey(provider, key, label ?? null);
+		this.#pool.reloadProvider(provider);
+		return id;
+	}
+
+	/** Name a credential; null clears the name. Throws when the name is taken within the provider. */
+	renameCredential(id: number, label: string | null): void {
+		this.#catalog().rename(id, label);
+	}
+
+	/** The row new sessions of `provider` resolve to first; null clears the default. */
+	setDefaultCredential(provider: string, id: number | null): void {
+		this.#catalog().setDefault(provider, id);
+	}
+
+	/** Strict session pin on an OAuth or API-key row; false when the row is missing. */
+	pinSessionCredential(provider: string, sessionId: string, id: number): boolean {
+		return this.#affinity.pinStrict(provider, sessionId, id);
+	}
+
+	/** Drop the session's strict pin; the session returns to the default and the pool. */
+	clearSessionCredential(provider: string, sessionId: string): void {
+		this.#affinity.unpin(provider, sessionId);
+	}
+
+	/** Clear a row's disabled cause. Returns false when no disabled row has this id. */
+	enableCredential(id: number): boolean {
+		const provider = this.#catalog().enable(id);
+		if (provider === undefined) return false;
+		this.#pool.reloadProvider(provider);
+		return true;
+	}
+
+	/** Disable one row by id and emit the disabled event; false when no active row has this id. */
+	disableCredentialById(id: number, cause: string): Promise<boolean> {
+		return this.#pool.disable(id, cause);
+	}
+
+	/** Disable one row of `provider` as "deleted by user"; the other rows stay. */
+	removeCredential(provider: string, id: number): Promise<boolean> {
+		return this.#pool.removeById(provider, id);
+	}
+
+	#catalog(): CredentialCatalog {
+		const catalog = this.#store.credentialCatalog;
+		if (!catalog) throw new AIError.ConfigurationError("This credential store does not support credential management");
+		return catalog;
+	}
+
+	#activeCredentialId(provider: string, sessionId: string | undefined): number | undefined {
+		if (!sessionId || this.#overrides.has(provider)) return undefined;
+		const preferred = this.#affinity.preferred(provider, sessionId);
+		if (preferred || this.#affinity.strictPin(provider, sessionId) !== undefined) return preferred?.credentialId;
+		const sticky = this.#affinity.get(provider, sessionId);
+		return sticky ? this.#pool.entries(provider)[sticky.index]?.id : undefined;
 	}
 }

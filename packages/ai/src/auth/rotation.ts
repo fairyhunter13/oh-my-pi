@@ -284,8 +284,10 @@ export class RateLimits implements LimitsApi {
 			routing,
 			providerTimed,
 		);
+		const pinned = this.#deps.affinity.strictPin(provider, sessionId) !== undefined;
 		return {
 			...rotation,
+			...(pinned ? { switched: false, retryAtMs: undefined } : {}),
 			requestedBlockedUntilMs,
 			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
 		};
@@ -433,7 +435,7 @@ export class RateLimits implements LimitsApi {
 			) {
 				this.#deps.affinity.clear(provider, sessionId);
 			}
-			return this.#blockCredentialForRotation(
+			const switched = this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,
 				sessionCredential.index,
@@ -441,19 +443,22 @@ export class RateLimits implements LimitsApi {
 				routing,
 				false,
 			).switched;
+			return switched && this.#deps.affinity.strictPin(provider, sessionId) === undefined;
 		}
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting
 		// suspect hook can't reindex the answer out from under us.
-		const hasSibling = this.#deps.pool
-			.credentials(provider)
-			.some(
-				(credential, index) =>
-					credential.type === sessionCredential.type &&
-					index !== sessionCredential.index &&
-					!this.#deps.blocks.isBlocked(provider, providerKey, index),
-			);
+		const hasSibling =
+			this.#deps.affinity.strictPin(provider, sessionId) === undefined &&
+			this.#deps.pool
+				.credentials(provider)
+				.some(
+					(credential, index) =>
+						credential.type === sessionCredential.type &&
+						index !== sessionCredential.index &&
+						!this.#deps.blocks.isBlocked(provider, providerKey, index),
+				);
 		const target = this.#deps.pool.entries(provider)[sessionCredential.index];
 		const sticky = this.#deps.affinity.get(provider, sessionId);
 		if (

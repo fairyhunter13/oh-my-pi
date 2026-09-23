@@ -7,6 +7,7 @@ import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, Usa
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
 import { credentialBlockScopesForRequest, DEFAULT_BLOCK_MS, providerTypeKey, type CredentialBlocks } from "./blocks";
+import { describeCredential, summarizeCredentialRow } from "./credential-catalog";
 import type { AccountPolicies } from "./policy";
 import { authCredentialEquals, type CredentialPool } from "./pool";
 import {
@@ -292,7 +293,8 @@ export class CredentialSelector {
 		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = providerTypeKey(provider, "api_key");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		// Stored order, not the session hash: several keys resolve in id order under ranking.
+		const order = credentials.map((_entry, position) => position);
 		const fallback = credentials[order[0]];
 		const strategy = this.#deps.strategies(provider);
 		if (!strategy) {
@@ -505,7 +507,10 @@ export class CredentialSelector {
 		const credentials = this.#deps.pool
 			.credentials(provider)
 			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+			.filter(
+				(entry): entry is { credential: OAuthCredential; index: number } =>
+					entry.credential.type === "oauth" && this.#pinAdmits(provider, sessionId, entry.index),
+			);
 		this.#deps.policies.validateFor(
 			provider,
 			credentials.map(entry => entry.credential),
@@ -541,7 +546,13 @@ export class CredentialSelector {
 		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
 		const checkUsage =
 			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
-		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
+		// The strict pin, else the provider default, is the session preference before any ranking.
+		const preferred = this.#deps.affinity.preferred(provider, sessionId);
+		const pinned = this.#deps.affinity.strictPin(provider, sessionId) !== undefined;
+		const sessionCredential =
+			preferred?.type === "oauth"
+				? { ...preferred, ...(pinned ? { explicit: true as const } : {}) }
+				: this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
@@ -830,6 +841,51 @@ export class CredentialSelector {
 		}
 
 		return undefined;
+	}
+
+	/** With a strict pin, only the pinned row may serve the session. */
+	#pinAdmits(provider: string, sessionId: string | undefined, index: number): boolean {
+		const pinnedId = this.#deps.affinity.strictPin(provider, sessionId);
+		return pinnedId === undefined || this.#deps.pool.entries(provider)[index]?.id === pinnedId;
+	}
+
+	/**
+	 * The cascade's first leg after runtime/config overrides. A strict pin resolves
+	 * only its own row and throws when that row cannot serve. A default api_key row
+	 * wins over OAuth and env while it is not blocked; a default oauth row is
+	 * preferred inside {@link CredentialSelector.resolveOAuth} instead.
+	 */
+	async resolvePreferred(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+	): Promise<
+		{ type: "api_key"; selection: ApiKeySelection } | { type: "oauth"; resolved: OAuthResolutionResult } | undefined
+	> {
+		await this.#deps.pool.adoptExternalChanges();
+		const pinnedId = this.#deps.affinity.strictPin(provider, sessionId);
+		const preferred = this.#deps.affinity.preferred(provider, sessionId);
+		const credential = preferred ? this.#deps.pool.credentials(provider)[preferred.index] : undefined;
+		if (preferred && credential?.type === "api_key") {
+			const blocked = this.#deps.blocks.isBlocked(provider, providerTypeKey(provider, "api_key"), preferred.index);
+			if (blocked && pinnedId === undefined) return undefined;
+			return { type: "api_key", selection: { credential, index: preferred.index } };
+		}
+		if (pinnedId === undefined) return undefined;
+		if (credential?.type === "oauth") {
+			const resolved = await this.resolveOAuth(provider, sessionId, options);
+			if (resolved) return { type: "oauth", resolved };
+		}
+		const row = this.#deps.store.credentialCatalog?.get(pinnedId);
+		const summary = row ? summarizeCredentialRow(row, undefined) : undefined;
+		const reason = !summary
+			? "the row no longer exists"
+			: summary.disabled
+				? `it is disabled: ${summary.disabled}`
+				: "it could not be refreshed or used";
+		throw new AIError.ConfigurationError(
+			`${provider} is pinned to credential ${describeCredential(summary, pinnedId)} in this session, and ${reason}. Pick another in /providers → Credentials, or clear the pin.`,
+		);
 	}
 
 	#syncOAuthSelectionFromStore(

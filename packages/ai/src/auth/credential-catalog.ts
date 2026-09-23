@@ -1,9 +1,9 @@
 /**
- * Credential catalog: user labels, a per-provider default, and explicit
- * session pins over the `auth_credentials` rows.
+ * Credential catalog: user labels and a per-provider default over the
+ * `auth_credentials` rows. Strict session pins live in ./affinity.ts.
  *
- * Kept apart from sqlite-credential-store.ts and auth-storage.ts so the
- * upstream files carry only small hooks into this module.
+ * Kept apart from sqlite-credential-store.ts so the upstream store carries
+ * only small hooks into this module.
  */
 import type { Database, Statement } from "bun:sqlite";
 
@@ -235,73 +235,4 @@ export function describeCredential(summary: CredentialSummary | undefined, id: n
 	if (!summary) return `#${id}`;
 	const name = summary.label ? `"${summary.label}"` : (summary.identity ?? summary.hint ?? summary.kind);
 	return `#${id} ${name}`;
-}
-
-/** Minimal cache surface of AuthCredentialStore the pins persist through. */
-export interface PinCacheStore {
-	getCache(key: string): string | null;
-	setCache(key: string, value: string, expiresAtSec: number): void;
-}
-
-const SESSION_PIN_CACHE_PREFIX = "session:pin:";
-/** A pin lives as long as a session can plausibly resume. */
-const SESSION_PIN_TTL_SEC = 365 * 24 * 60 * 60;
-
-/**
- * Explicit session pins. Separate from the upstream session sticky, which
- * every resolve rewrites: a pin is only written by a user choice, so usage
- * ranking and anthropic idle warmth never move it.
- */
-export class SessionCredentialPins {
-	/** provider → sessionId → credential id, or null for a cached absence. */
-	readonly #pins = new Map<string, Map<string, number | null>>();
-
-	get(store: PinCacheStore, provider: string, sessionId: string | undefined): number | undefined {
-		if (!sessionId) return undefined;
-		const bySession = this.#pins.get(provider);
-		const cached = bySession?.get(sessionId);
-		if (cached !== undefined) return cached ?? undefined;
-		let id: number | null = null;
-		try {
-			const raw = store.getCache(`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`);
-			const parsed = raw ? (JSON.parse(raw) as { credentialId?: unknown }) : undefined;
-			if (typeof parsed?.credentialId === "number") id = parsed.credentialId;
-		} catch {
-			id = null;
-		}
-		this.#remember(provider, sessionId, id);
-		return id ?? undefined;
-	}
-
-	set(store: PinCacheStore, provider: string, sessionId: string, credentialId: number): void {
-		const nowSec = Math.floor(Date.now() / 1000);
-		store.setCache(
-			`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`,
-			JSON.stringify({ credentialId }),
-			nowSec + SESSION_PIN_TTL_SEC,
-		);
-		this.#remember(provider, sessionId, credentialId);
-	}
-
-	clear(store: PinCacheStore, provider: string, sessionId: string): void {
-		store.setCache(`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`, "", 0);
-		this.#remember(provider, sessionId, null);
-	}
-
-	/** Copy every pin of `source` to `target` (subagents keep their parent's account separation). */
-	inherit(store: PinCacheStore, providers: Iterable<string>, source: string, target: string): void {
-		for (const provider of providers) {
-			const id = this.get(store, provider, source);
-			if (id !== undefined) this.set(store, provider, target, id);
-		}
-	}
-
-	#remember(provider: string, sessionId: string, id: number | null): void {
-		let bySession = this.#pins.get(provider);
-		if (!bySession) {
-			bySession = new Map();
-			this.#pins.set(provider, bySession);
-		}
-		bySession.set(sessionId, id);
-	}
 }

@@ -7,6 +7,10 @@ import type { KeyOverrides } from "./cascade";
 
 /** Prefix for persisted session-to-credential affinity. */
 export const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
+/** Prefix for persisted strict session pins (a user choice, never rewritten by selection). */
+export const SESSION_PIN_CACHE_PREFIX = "session:pin:";
+/** A strict pin lives as long as a session can plausibly resume. */
+const SESSION_PIN_TTL_SEC = 365 * 24 * 60 * 60;
 
 /** A session's pinned credential (resolved index + durable row id). */
 export type SessionCredential = {
@@ -22,6 +26,8 @@ export type SessionCredential = {
 export class SessionAffinity implements SessionsApi {
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
 	#sessionLastCredential: Map<string, Map<string, SessionCredential>> = new Map();
+	/** Strict pins: provider → sessionId → credential id, or null for a cached absence. */
+	#strictPins: Map<string, Map<string, number | null>> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
 	#overrides: KeyOverrides;
@@ -204,9 +210,8 @@ export class SessionAffinity implements SessionsApi {
 	 * Pin one stored OAuth account as this session's preferred credential.
 	 *
 	 * The durable credential id keeps the pin stable across credential refreshes,
-	 * storage reordering, and process restarts. By default this is an explicit
-	 * user pin: ranking and account reserve never evict it; hard unavailability
-	 * and auth retry may still route around it.
+	 * storage reordering, and process restarts. By default this is a strict
+	 * user pin (see {@link SessionAffinity.pinStrict}), limited to OAuth rows.
 	 *
 	 * `options.restoredAtMs` instead restores an automatic affinity recorded by a
 	 * persisted session, backdated to its last use, so it keeps the provider's
@@ -222,8 +227,84 @@ export class SessionAffinity implements SessionsApi {
 		const target = stored[index];
 		if (target?.credential.type !== "oauth") return false;
 		const restoredAtMs = options?.restoredAtMs;
+		if (restoredAtMs === undefined) this.#writeStrictPin(provider, sessionId, credentialId);
 		this.record(provider, sessionId, "oauth", index, restoredAtMs, restoredAtMs === undefined);
 		return true;
+	}
+
+	/**
+	 * Strict pin on one stored row, OAuth or API key: only that row serves the
+	 * session. Ranking, reserve, idle warmth, rate-limit blocks and auth retry
+	 * never route around it, and a disabled or deleted row fails the request.
+	 * Returns false for a missing row or an overridden provider.
+	 */
+	pinStrict(provider: string, sessionId: string, credentialId: number): boolean {
+		if (!sessionId || this.#overrides.has(provider)) return false;
+		this.#pool.reloadProvider(provider);
+		const stored = this.#pool.entries(provider);
+		const index = stored.findIndex(entry => entry.id === credentialId);
+		const target = stored[index];
+		if (!target) return false;
+		this.#writeStrictPin(provider, sessionId, credentialId);
+		this.record(provider, sessionId, target.credential.type, index, undefined, true);
+		return true;
+	}
+
+	/** The session's strict pin, or undefined. */
+	strictPin(provider: string, sessionId: string | undefined): number | undefined {
+		if (!sessionId) return undefined;
+		const cached = this.#strictPins.get(provider)?.get(sessionId);
+		if (cached !== undefined) return cached ?? undefined;
+		let id: number | null = null;
+		try {
+			const raw = this.#store.getCache(`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`);
+			const parsed = raw ? (JSON.parse(raw) as { credentialId?: unknown }) : undefined;
+			if (typeof parsed?.credentialId === "number") id = parsed.credentialId;
+		} catch (err) {
+			logger.debug("Failed to read strict session pin from persistent store cache", { err });
+		}
+		this.#rememberStrictPin(provider, sessionId, id);
+		return id ?? undefined;
+	}
+
+	/** Drop the session's strict pin; the session returns to the default and the pool. */
+	unpin(provider: string, sessionId: string): void {
+		this.#store.setCache(`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`, "", 0);
+		this.#rememberStrictPin(provider, sessionId, null);
+	}
+
+	/**
+	 * The row a session takes before any usage ranking: its strict pin, else the
+	 * provider's enabled default. Undefined when neither names a loaded row.
+	 */
+	preferred(
+		provider: string,
+		sessionId: string | undefined,
+	): { type: AuthCredential["type"]; index: number; credentialId: number } | undefined {
+		const id = this.strictPin(provider, sessionId) ?? this.#store.credentialCatalog?.defaultId(provider);
+		if (id === undefined) return undefined;
+		const stored = this.#pool.entries(provider);
+		const index = stored.findIndex(entry => entry.id === id);
+		return index === -1 ? undefined : { type: stored[index]!.credential.type, index, credentialId: id };
+	}
+
+	#writeStrictPin(provider: string, sessionId: string, credentialId: number): void {
+		const nowSec = Math.floor(Date.now() / 1000);
+		this.#store.setCache(
+			`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`,
+			JSON.stringify({ credentialId }),
+			nowSec + SESSION_PIN_TTL_SEC,
+		);
+		this.#rememberStrictPin(provider, sessionId, credentialId);
+	}
+
+	#rememberStrictPin(provider: string, sessionId: string, id: number | null): void {
+		let bySession = this.#strictPins.get(provider);
+		if (!bySession) {
+			bySession = new Map();
+			this.#strictPins.set(provider, bySession);
+		}
+		bySession.set(sessionId, id);
 	}
 
 	/**
@@ -249,6 +330,10 @@ export class SessionAffinity implements SessionsApi {
 				credential.explicit === true,
 			);
 			inherited += 1;
+		}
+		for (const provider of this.#pool.providers()) {
+			const pinned = this.strictPin(provider, sourceSessionId);
+			if (pinned !== undefined) this.#writeStrictPin(provider, targetSessionId, pinned);
 		}
 		return inherited;
 	}

@@ -1,5 +1,6 @@
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
+import type { CredentialCatalog } from "./credential-catalog";
 import type {
 	ClientUsageIdentity,
 	ClientUsageReport,
@@ -33,6 +34,8 @@ export interface CredentialRowStore {
 	pollExternalChanges?(): boolean;
 	/** Record the current auth revision after a local mutation already notified consumers. */
 	acknowledgeLocalChanges?(): void;
+	/** Labels, per-provider defaults and re-enabling (SQLite store only). */
+	credentialCatalog?: CredentialCatalog;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
 	/**
 	 * Optional store hook to re-hydrate the credential snapshot from its

@@ -876,7 +876,8 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				const key = await authStorage.keys.get("nvidia", `session-${index}`);
 				if (key) selectedKeys.add(key);
 			}
-			expect(selectedKeys).toEqual(new Set(["nvapi-first", "nvapi-second"]));
+			// Both rows stay active; unpinned sessions resolve them in id order.
+			expect(selectedKeys).toEqual(new Set(["nvapi-first"]));
 		} finally {
 			authStorage.close();
 		}
