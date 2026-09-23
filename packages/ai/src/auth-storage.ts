@@ -293,16 +293,18 @@ export class AuthStorage {
 
 	// ─── Credential catalog: /providers → Credentials (see ./auth/credential-catalog.ts) ───
 
-	/** Every stored credential, disabled rows included; `active` marks what `sessionId` resolves to. */
+	/** Every stored credential, disabled rows included; `active` and `pinned` describe `sessionId`'s choice. */
 	listCredentials(provider?: string, sessionId?: string): CredentialSummary[] {
-		const activeByProvider = new Map<string, number | undefined>();
+		const marksByProvider = new Map<string, { activeId?: number; pinnedId?: number }>();
 		return this.#catalog()
 			.list(provider)
 			.map(row => {
-				if (!activeByProvider.has(row.provider)) {
-					activeByProvider.set(row.provider, this.#activeCredentialId(row.provider, sessionId));
+				let marks = marksByProvider.get(row.provider);
+				if (!marks) {
+					marks = this.#credentialMarks(row.provider, sessionId);
+					marksByProvider.set(row.provider, marks);
 				}
-				return summarizeCredentialRow(row, activeByProvider.get(row.provider));
+				return summarizeCredentialRow(row, marks);
 			});
 	}
 
@@ -357,11 +359,12 @@ export class AuthStorage {
 		return catalog;
 	}
 
-	#activeCredentialId(provider: string, sessionId: string | undefined): number | undefined {
-		if (!sessionId || this.#overrides.has(provider)) return undefined;
-		const preferred = this.#affinity.preferred(provider, sessionId);
-		if (preferred || this.#affinity.strictPin(provider, sessionId) !== undefined) return preferred?.credentialId;
-		const sticky = this.#affinity.get(provider, sessionId);
-		return sticky ? this.#pool.entries(provider)[sticky.index]?.id : undefined;
+	/** Only a user choice marks a row: the pin, else the default. Ranking and the sticky never do. */
+	#credentialMarks(provider: string, sessionId: string | undefined): { activeId?: number; pinnedId?: number } {
+		if (!sessionId || this.#overrides.has(provider)) return {};
+		return {
+			activeId: this.#affinity.preferred(provider, sessionId)?.credentialId,
+			pinnedId: this.#affinity.strictPin(provider, sessionId),
+		};
 	}
 }

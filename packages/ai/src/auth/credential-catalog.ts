@@ -23,8 +23,14 @@ export interface CredentialSummary {
 	disabled: string | null;
 	/** The provider's default for new sessions. */
 	isDefault: boolean;
-	/** The row this session resolves to right now (false without a session id). */
+	/**
+	 * The row this session uses by choice: its pin, else the provider's default.
+	 * A row that usage ranking picked for an unpinned session is not active.
+	 * False without a session id.
+	 */
 	active: boolean;
+	/** This session has an explicit pin on this row. */
+	pinned: boolean;
 }
 
 /** Raw catalog row: every column the summary needs, disabled rows included. */
@@ -202,8 +208,11 @@ export class SqliteCredentialCatalog implements CredentialCatalog {
 	}
 }
 
-/** Build the summary for one row; `activeId` comes from the session's resolution state. */
-export function summarizeCredentialRow(row: CredentialCatalogRow, activeId: number | undefined): CredentialSummary {
+/** Build the summary for one row; the marks come from the session's pin and the provider's default. */
+export function summarizeCredentialRow(
+	row: CredentialCatalogRow,
+	marks: { activeId?: number; pinnedId?: number },
+): CredentialSummary {
 	let data: Record<string, unknown> = {};
 	try {
 		const parsed = JSON.parse(row.data) as unknown;
@@ -226,7 +235,8 @@ export function summarizeCredentialRow(row: CredentialCatalogRow, activeId: numb
 		hint: key ? `…${key.slice(-4)}` : null,
 		disabled: row.disabled_cause,
 		isDefault: row.is_default === 1,
-		active: activeId !== undefined && activeId === row.id,
+		active: marks.activeId === row.id,
+		pinned: marks.pinnedId === row.id,
 	};
 }
 

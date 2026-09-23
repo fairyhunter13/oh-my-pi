@@ -877,7 +877,7 @@ export class CredentialSelector {
 			if (resolved) return { type: "oauth", resolved };
 		}
 		const row = this.#deps.store.credentialCatalog?.get(pinnedId);
-		const summary = row ? summarizeCredentialRow(row, undefined) : undefined;
+		const summary = row ? summarizeCredentialRow(row, {}) : undefined;
 		const reason = !summary
 			? "the row no longer exists"
 			: summary.disabled

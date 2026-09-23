@@ -28,21 +28,18 @@ function credentialName(row: CredentialSummary): string {
 	return row.label ?? row.identity ?? row.hint ?? `#${row.id}`;
 }
 
+/** The name column holds only the name; marks lead the second column so a long name never hides them. */
 function credentialItem(row: CredentialSummary): SelectItem {
-	const tags = [row.active ? "active" : "", row.isDefault ? "default" : "", row.disabled ? "disabled" : ""].filter(
-		Boolean,
-	);
 	const detail = [
 		row.kind === "oauth" ? "subscription" : "API key",
+		row.active ? "active" : null,
+		row.isDefault ? "default" : null,
+		row.disabled ? "disabled" : null,
 		row.label ? (row.identity ?? row.hint) : null,
 		`#${row.id}`,
-		row.disabled ? `disabled: ${row.disabled}` : null,
+		row.disabled,
 	].filter(Boolean);
-	return {
-		value: `row:${row.id}`,
-		label: `${credentialName(row)}${tags.length > 0 ? `  [${tags.join(", ")}]` : ""}`,
-		description: detail.join(" · "),
-	};
+	return { value: `row:${row.id}`, label: credentialName(row), description: detail.join(" · ") };
 }
 
 /**
@@ -237,7 +234,7 @@ export class CredentialsTab implements SetupTab {
 				for (const info of this.#oauthFor(view.provider)) {
 					items.push({ value: `add:oauth:${info.id}`, label: `+ Add subscription: ${info.name}` });
 				}
-				if (this.#host.ctx.sessionId && rows.some(row => row.active)) {
+				if (rows.some(row => row.pinned)) {
 					items.push({
 						value: "pin:clear",
 						label: "Use the pool in this session",
