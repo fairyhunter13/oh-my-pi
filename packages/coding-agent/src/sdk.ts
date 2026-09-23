@@ -14,6 +14,7 @@ import {
 import type {
 	Context,
 	CredentialDisabledEvent,
+	CredentialRemovedEvent,
 	Effort,
 	Message,
 	Model,
@@ -1574,6 +1575,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 	});
 	startupCleanup.defer(unsubscribeCredentialDisabled);
+	// Same startup-buffer rationale as credential_disabled above: a caller can remove
+	// a credential before the extension runner initializes.
+	const startupCredentialRemovedEvents: CredentialRemovedEvent[] = [];
+	let credentialRemovedTarget: ExtensionRunner | undefined;
+	const unsubscribeCredentialRemoved = authStorage.credentials.onRemoved(event => {
+		if (credentialRemovedTarget) {
+			// Discard return: any handler error is routed through runner.onError listeners.
+			void credentialRemovedTarget.emitCredentialRemoved(event);
+		} else {
+			startupCredentialRemovedEvents.push(event);
+		}
+	});
+	startupCleanup.defer(unsubscribeCredentialRemoved);
 	await logger.time("hydrateCredentialScopedModelCaches", () => modelRegistry.hydrateCredentialScopedModelCaches());
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
@@ -3094,6 +3108,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		for (const event of startupCredentialDisabledEvents.splice(0)) {
 			// Discard return: any handler error is routed through runner.onError listeners.
 			void extensionRunner.emitCredentialDisabled(event);
+		}
+
+		credentialRemovedTarget = extensionRunner;
+		for (const event of startupCredentialRemovedEvents.splice(0)) {
+			// Discard return: any handler error is routed through runner.onError listeners.
+			void extensionRunner.emitCredentialRemoved(event);
 		}
 
 		const getSessionContext = () => ({
@@ -4701,6 +4721,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				} finally {
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled();
+					unsubscribeCredentialRemoved();
 					unbindSessionEffects?.();
 					restoreProviderToggles?.();
 					unsubscribeMcpNotifications?.();

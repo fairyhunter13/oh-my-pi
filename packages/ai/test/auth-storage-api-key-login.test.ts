@@ -177,6 +177,24 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(store.getApiKey("kagi")).toBe("new-key-456");
 	});
 
+	it("keeps a key the user disabled when another key logs in, and purges a removed one", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+		const kept = authStorage.addApiKey("kagi", "disabled-key");
+		const removed = authStorage.addApiKey("kagi", "removed-key");
+		authStorage.disableCredentialById(kept, "disabled by user");
+		expect(await authStorage.removeCredential("kagi", removed)).toBe(true);
+
+		await store.upsertAuthCredential("kagi", { type: "api_key", key: "login-key", source: "login" });
+
+		const rows = authStorage.listCredentials("kagi");
+		expect(rows.map(row => [row.hint, row.disabled])).toEqual([
+			["…-key", "disabled by user"],
+			["…-key", null],
+		]);
+		expect(rows[0]?.id).toBe(kept);
+		expect(countCredentialRows(dbPath, "kagi")).toBe(2);
+	});
+
 	it("reuses the stored api-key row when ollama-cloud re-login returns the same key", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 

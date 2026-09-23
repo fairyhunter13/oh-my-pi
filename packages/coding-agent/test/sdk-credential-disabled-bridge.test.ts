@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage, type CredentialDisabledEvent, getOAuthProviders } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	type CredentialDisabledEvent,
+	type CredentialRemovedEvent,
+	getOAuthProviders,
+} from "@oh-my-pi/pi-ai";
 import * as oauthUtils from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -648,6 +653,50 @@ describe("createAgentSession credential_disabled subscription", () => {
 
 			expect(embedderEvents.map(event => event.provider)).toEqual([provider]);
 			expect(notices).toEqual([]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("credential_removed fans out to both embedder and session-extension subscribers", async () => {
+		const dirs = makeDirs("removed-fanout");
+		const embedderEvents: CredentialRemovedEvent[] = [];
+		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
+			onCredentialRemoved: event => {
+				embedderEvents.push(event);
+			},
+		});
+		const events: CredentialRemovedEvent[] = [];
+		const waiters: Array<{ resolve: (event: CredentialRemovedEvent) => void }> = [];
+		const ext: ExtensionFactory = pi => {
+			pi.on("credential_removed", event => {
+				const observed = { provider: event.provider, credentials: event.credentials };
+				events.push(observed);
+				const waiter = waiters.shift();
+				if (waiter) waiter.resolve(observed);
+			});
+		};
+		const nextRemoved = (): Promise<CredentialRemovedEvent> => {
+			if (events.length > waiters.length) return Promise.resolve(events[waiters.length] as CredentialRemovedEvent);
+			const { promise, resolve } = Promise.withResolvers<CredentialRemovedEvent>();
+			waiters.push({ resolve });
+			return promise;
+		};
+
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [ext]));
+		initializeRunnerForTest(session.extensionRunner);
+
+		try {
+			const id = authStorage.addApiKey("removed-fanout-provider", "sk-fanout");
+			const observed = nextRemoved();
+			await authStorage.removeCredential("removed-fanout-provider", id);
+			const removedEvent = await observed;
+
+			expect(embedderEvents).toHaveLength(1);
+			expect(embedderEvents[0]?.provider).toBe("removed-fanout-provider");
+			expect(embedderEvents[0]?.credentials.map(row => row.id)).toEqual([id]);
+			expect(removedEvent.provider).toBe("removed-fanout-provider");
+			expect(removedEvent.credentials.map(row => row.id)).toEqual([id]);
 		} finally {
 			await session.dispose();
 		}

@@ -93,6 +93,7 @@ export class AuthStorage {
 		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
 		this.#modules = this.#compose(store, options.sourceLabel);
 		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
+		if (options.onCredentialRemoved) this.#modules.pool.onRemoved(options.onCredentialRemoved);
 	}
 
 	/** Stored credential rows, change/disable events, broker snapshot. */
@@ -237,7 +238,7 @@ export class AuthStorage {
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
 			sourceLabel,
 		});
-		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
+		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher, store });
 
 		return {
 			store,
@@ -348,14 +349,35 @@ export class AuthStorage {
 		return this.#pool.disable(id, cause);
 	}
 
-	/** Remove one row of `provider`, active or disabled; the other rows stay. A removed row no longer lists. */
-	removeCredential(provider: string, id: number): Promise<boolean> {
-		return this.#pool.removeById(provider, id);
+	/**
+	 * Remove one row of `provider`, active or disabled; the other rows stay. A removed row no
+	 * longer lists. When `options.sessionId`'s strict pin names this row, the pin is cleared —
+	 * later resolves for that session fall through to the provider's default or the ranked pool.
+	 */
+	async removeCredential(provider: string, id: number, options?: { sessionId?: string }): Promise<boolean> {
+		const removed = await this.#pool.removeById(provider, id);
+		if (removed && options?.sessionId) this.#clearPinOnRemoval(provider, id, options.sessionId);
+		return removed;
+	}
+
+	/**
+	 * Remove every stored row of `provider`. When `options.sessionId` is given, that session's
+	 * pin (if any) is cleared — every row it could have named is now gone.
+	 */
+	async remove(provider: string, options?: { sessionId?: string }): Promise<void> {
+		await this.#pool.remove(provider);
+		if (options?.sessionId) this.#affinity.unpin(provider, options.sessionId);
+	}
+
+	/** Clear `sessionId`'s pin when it names the row just removed. A no-op without a match. */
+	#clearPinOnRemoval(provider: string, credentialId: number, sessionId: string): void {
+		if (this.#affinity.strictPin(provider, sessionId) === credentialId) this.#affinity.unpin(provider, sessionId);
 	}
 
 	#catalog(): CredentialCatalog {
 		const catalog = this.#store.credentialCatalog;
-		if (!catalog) throw new AIError.ConfigurationError("This credential store does not support credential management");
+		if (!catalog)
+			throw new AIError.ConfigurationError("This credential store does not support credential management");
 		return catalog;
 	}
 

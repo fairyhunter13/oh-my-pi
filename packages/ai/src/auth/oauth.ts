@@ -4,10 +4,12 @@ import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
 import { getOAuthProvider } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
+import { OAUTH_LOGIN_REPLACED_CAUSE } from "./credential-catalog";
 import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
+import type { AuthCredentialStore } from "./store";
 import type { OAuthRefresher } from "./refresh";
 import type { CredentialSelector } from "./select";
 import type {
@@ -40,6 +42,7 @@ export interface OAuthAccountsDeps {
 	selector: CredentialSelector;
 	affinity: SessionAffinity;
 	refresher: OAuthRefresher;
+	store: AuthCredentialStore;
 }
 
 /** OAuth login, per-account access resolution, and account listings. */
@@ -105,7 +108,37 @@ export class OAuthAccounts implements OAuthApi {
 		// Use pool.upsertOAuth to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
+		//
+		// upsertOAuth disables (OAUTH_LOGIN_REPLACED_CAUSE) every enabled api_key row of
+		// this provider whenever an oauth credential lands, even when the user meant to
+		// keep them for other tooling. Snapshot the ones that were enabled beforehand and
+		// re-enable exactly those afterward — never a row the user had already disabled
+		// themselves.
+		const storageProvider = def.storeCredentialsAs ?? provider;
+		const catalog = this.#deps.store.credentialCatalog;
+		const priorEnabledApiKeyIds = catalog
+			? new Set(
+					catalog
+						.list(storageProvider)
+						.filter(row => row.credential_type === "api_key" && row.disabled_cause === null)
+						.map(row => row.id),
+				)
+			: undefined;
+		await this.#deps.pool.upsertOAuth(storageProvider, newCredential);
+		if (catalog && priorEnabledApiKeyIds && priorEnabledApiKeyIds.size > 0) {
+			let restoredAny = false;
+			for (const row of catalog.list(storageProvider)) {
+				if (
+					row.credential_type === "api_key" &&
+					priorEnabledApiKeyIds.has(row.id) &&
+					row.disabled_cause === OAUTH_LOGIN_REPLACED_CAUSE
+				) {
+					catalog.enable(row.id);
+					restoredAny = true;
+				}
+			}
+			if (restoredAny) this.#deps.pool.reloadProvider(storageProvider);
+		}
 		return {
 			type: "oauth",
 			email: newCredential.email,

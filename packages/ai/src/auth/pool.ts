@@ -1,5 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { DELETED_BY_USER_CAUSE } from "./credential-catalog";
+import { DELETED_BY_USER_CAUSE, summarizeCredentialRow } from "./credential-catalog";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
 import type { AccountPolicies } from "./policy";
@@ -13,6 +13,7 @@ import type {
 	AuthCredentialSnapshotEntry,
 	AuthStorageData,
 	CredentialDisabledEvent,
+	CredentialRemovedEvent,
 	CredentialsApi,
 	DisabledCredentialSummary,
 	OAuthCredential,
@@ -23,6 +24,7 @@ import type { UsageCredential } from "../usage";
 
 const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
 const MAX_PENDING_DISABLED_EVENTS = 32;
+const MAX_PENDING_REMOVED_EVENTS = 32;
 
 /** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
 function fingerprintOAuthBearer(bearer: string): string {
@@ -103,6 +105,12 @@ export class CredentialPool implements CredentialsApi {
 	 * but a process that runs without subscribers for a long time shouldn't grow this unboundedly).
 	 */
 	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
+	#credentialRemovedListeners: Set<(event: CredentialRemovedEvent) => void | Promise<void>> = new Set();
+	/**
+	 * Buffer for credential_removed events fired while no listener is subscribed.
+	 * Same replay-on-first-subscriber contract as {@link CredentialPool.#pendingDisabledEvents}.
+	 */
+	#pendingRemovedEvents: CredentialRemovedEvent[] = [];
 	#generation = 1;
 	#generationListeners: Set<(generation: number) => void> = new Set();
 	#closed = false;
@@ -208,15 +216,18 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	/**
-	 * Take over the subscribers, buffered disable events, and generation counter of
+	 * Take over the subscribers, buffered disable/remove events, and generation counter of
 	 * the pool this one replaces (store swap). Listener sets are shared, so
 	 * unsubscribe functions handed out by `previous` keep working.
 	 */
 	adoptSubscribers(previous: CredentialPool): void {
 		this.#credentialDisabledListeners = previous.#credentialDisabledListeners;
+		this.#credentialRemovedListeners = previous.#credentialRemovedListeners;
 		this.#generationListeners = previous.#generationListeners;
 		this.#pendingDisabledEvents = previous.#pendingDisabledEvents;
 		previous.#pendingDisabledEvents = [];
+		this.#pendingRemovedEvents = previous.#pendingRemovedEvents;
+		previous.#pendingRemovedEvents = [];
 		this.#generation = previous.#generation;
 	}
 
@@ -272,6 +283,28 @@ export class CredentialPool implements CredentialsApi {
 		}
 		return () => {
 			this.#credentialDisabledListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Subscribe to {@link CredentialRemovedEvent}s. Same fan-out, error-isolation, and
+	 * no-subscriber replay contract as {@link CredentialPool.onDisabled}.
+	 *
+	 * @param listener Callback invoked with each removal event. May be sync or async.
+	 * @returns A function that removes this listener from the subscriber set.
+	 */
+	onRemoved(listener: (event: CredentialRemovedEvent) => void | Promise<void>): () => void {
+		const wasEmpty = this.#credentialRemovedListeners.size === 0;
+		this.#credentialRemovedListeners.add(listener);
+		if (wasEmpty && this.#pendingRemovedEvents.length > 0) {
+			const drained = this.#pendingRemovedEvents;
+			this.#pendingRemovedEvents = [];
+			for (const event of drained) {
+				this.#invokeRemovedListener(listener, event);
+			}
+		}
+		return () => {
+			this.#credentialRemovedListeners.delete(listener);
 		};
 	}
 
@@ -553,6 +586,40 @@ export class CredentialPool implements CredentialsApi {
 		}
 	}
 
+	emitRemoved(event: CredentialRemovedEvent): void {
+		if (this.#credentialRemovedListeners.size === 0) {
+			if (this.#pendingRemovedEvents.length >= MAX_PENDING_REMOVED_EVENTS) {
+				this.#pendingRemovedEvents.shift();
+			}
+			this.#pendingRemovedEvents.push(event);
+			return;
+		}
+		const listeners = [...this.#credentialRemovedListeners];
+		for (const listener of listeners) {
+			this.#invokeRemovedListener(listener, event);
+		}
+	}
+
+	#invokeRemovedListener(
+		listener: (event: CredentialRemovedEvent) => void | Promise<void>,
+		event: CredentialRemovedEvent,
+	): void {
+		const logListenerError = (error: unknown): void => {
+			logger.warn("onCredentialRemoved listener threw", {
+				provider: event.provider,
+				error: String(error),
+			});
+		};
+		try {
+			const result = listener(event);
+			if (result && typeof (result as PromiseLike<void>).then === "function") {
+				(result as Promise<void>).catch(logListenerError);
+			}
+		} catch (error) {
+			logListenerError(error);
+		}
+	}
+
 	/**
 	 * Get credential for a provider (first entry if multiple).
 	 */
@@ -626,9 +693,13 @@ export class CredentialPool implements CredentialsApi {
 	 * Remove credential for a provider.
 	 */
 	async remove(provider: string): Promise<void> {
+		const removedSummaries = (this.#store.credentialCatalog?.list(provider) ?? []).map(row =>
+			summarizeCredentialRow(row, {}),
+		);
 		await this.#store.deleteAuthCredentials(provider, "deleted by user");
 		this.replace(provider, []);
 		this.reset(provider);
+		if (removedSummaries.length > 0) this.emitRemoved({ provider, credentials: removedSummaries });
 	}
 
 	/**
@@ -650,7 +721,10 @@ export class CredentialPool implements CredentialsApi {
 			const catalog = this.#store.credentialCatalog;
 			const row = catalog?.get(credentialId);
 			if (!catalog || row?.provider !== provider || row.disabled_cause === null) return false;
-			return catalog.markDeleted(credentialId, DELETED_BY_USER_CAUSE);
+			const removedSummary = summarizeCredentialRow(row, {});
+			const removed = catalog.markDeleted(credentialId, DELETED_BY_USER_CAUSE);
+			if (removed) this.emitRemoved({ provider, credentials: [removedSummary] });
+			return removed;
 		}
 		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
 		this.#options.policies.validateFor(
@@ -658,10 +732,15 @@ export class CredentialPool implements CredentialsApi {
 			remainingEntries.map(entry => entry.credential),
 		);
 
+		const catalogRow = this.#store.credentialCatalog?.get(credentialId);
+		const removedSummary =
+			catalogRow && catalogRow.provider === provider ? summarizeCredentialRow(catalogRow, {}) : undefined;
+
 		const deleted = await this.#store.deleteAuthCredential(credentialId, DELETED_BY_USER_CAUSE);
 		if (!deleted) return false;
 		this.replace(provider, remainingEntries);
 		this.reset(provider);
+		if (removedSummary) this.emitRemoved({ provider, credentials: [removedSummary] });
 		return true;
 	}
 

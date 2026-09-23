@@ -9,7 +9,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type { CredentialDisabledEvent, CredentialRemovedEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -331,6 +331,7 @@ async function raceHandlerWithTimeout<T>(
 }
 
 const MAX_PENDING_CREDENTIAL_DISABLED = 32;
+const MAX_PENDING_CREDENTIAL_REMOVED = 32;
 
 /**
  * Buffer cap for `mcp_notification` events received before {@link ExtensionRunner.initialize}
@@ -493,6 +494,13 @@ export class ExtensionRunner {
 	 * {@link MAX_PENDING_CREDENTIAL_DISABLED}; oldest entries are dropped under pressure.
 	 */
 	#pendingCredentialDisabled: CredentialDisabledEvent[] = [];
+	/**
+	 * Buffer for `credential_removed` events received via {@link emitCredentialRemoved}
+	 * before {@link initialize} has run. Same deferral contract as
+	 * {@link ExtensionRunner.#pendingCredentialDisabled}. Bounded at
+	 * {@link MAX_PENDING_CREDENTIAL_REMOVED}; oldest entries are dropped under pressure.
+	 */
+	#pendingCredentialRemoved: CredentialRemovedEvent[] = [];
 
 	/**
 	 * Buffer for `mcp_notification` events received via {@link emitMcpNotification} before
@@ -829,6 +837,20 @@ export class ExtensionRunner {
 			}
 		});
 
+		// Drain events buffered by emitCredentialRemoved() before initialize ran, using the
+		// same deferred-microtask ordering as the credential-disabled drain above.
+		const pendingRemoved = this.#pendingCredentialRemoved.splice(0);
+		queueMicrotask(() => {
+			for (const event of pendingRemoved) {
+				this.emit({ type: "credential_removed", ...event }).catch((error: unknown) => {
+					logger.warn("credential_removed handler threw during initialize flush", {
+						provider: event.provider,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+			}
+		});
+
 		// Drain events buffered by emitMcpNotification() before initialize ran, using the
 		// same deferred-microtask ordering as the credential-disabled drain above so any
 		// onError listener registered synchronously after initialize() still catches
@@ -870,6 +892,24 @@ export class ExtensionRunner {
 			return;
 		}
 		await this.emit({ type: "credential_disabled", ...event });
+	}
+
+	/**
+	 * Forward a `credential_removed` event from `AuthStorage` to extension handlers.
+	 * Same buffer-until-initialize contract as {@link emitCredentialDisabled}.
+	 *
+	 * Always returns; never throws. Errors from handlers are routed through
+	 * {@link onError} via {@link emit}'s normal isolation.
+	 */
+	async emitCredentialRemoved(event: CredentialRemovedEvent): Promise<void> {
+		if (!this.#initialized) {
+			if (this.#pendingCredentialRemoved.length >= MAX_PENDING_CREDENTIAL_REMOVED) {
+				this.#pendingCredentialRemoved.shift();
+			}
+			this.#pendingCredentialRemoved.push(event);
+			return;
+		}
+		await this.emit({ type: "credential_removed", ...event });
 	}
 
 	/**

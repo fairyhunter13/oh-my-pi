@@ -17,6 +17,8 @@ export interface CredentialSummary {
 	label: string | null;
 	/** oauth: email, else account/org id. api_key: null. */
 	identity: string | null;
+	/** oauth: org name, else org id, when distinct from `identity`. api_key: null. */
+	org: string | null;
 	/** api_key: last 4 characters, e.g. "…a1b2". oauth: null. */
 	hint: string | null;
 	/** disabled_cause, or null when usable. */
@@ -65,6 +67,18 @@ export const OAUTH_LOGIN_REPLACED_CAUSE = "replaced by oauth login";
 
 /** Cause of a removed row. The catalog treats such a tombstone as missing. */
 export const DELETED_BY_USER_CAUSE = "deleted by user";
+
+/** Cause the store writes when a login re-uploads an identical API key. */
+const REPLACED_BY_NEWER_CAUSE = "replaced by newer credential";
+
+/**
+ * The store hard-deletes disabled API-key rows on every upsert of a provider that has an
+ * active key. Only a removal tombstone or a replaced duplicate may go that way: a key the user
+ * or a login disabled is still the user's key and stays listed until the user removes it.
+ */
+export function isPurgeableApiKeyCause(cause: string | null): boolean {
+	return cause === DELETED_BY_USER_CAUSE || cause === REPLACED_BY_NEWER_CAUSE;
+}
 
 /**
  * Schema V8 → V9: `label` and `is_default`. Idempotent, because a fresh database
@@ -248,6 +262,13 @@ export function summarizeCredentialRow(
 			kind === "oauth"
 				? (text(data.email) ?? text(data.accountId) ?? text(data.orgName) ?? text(data.orgId) ?? text(data.projectId))
 				: null,
+		org: (() => {
+			if (kind !== "oauth") return null;
+			const org = text(data.orgName) ?? text(data.orgId);
+			const identity =
+				text(data.email) ?? text(data.accountId) ?? text(data.orgName) ?? text(data.orgId) ?? text(data.projectId);
+			return org && org !== identity ? org : null;
+		})(),
 		hint: key ? `…${key.slice(-4)}` : null,
 		disabled: row.disabled_cause,
 		isDefault: row.is_default === 1,

@@ -42,6 +42,7 @@ import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
+	CredentialSummary,
 	ImageContent,
 	Model,
 	ModelSpec,
@@ -890,6 +891,15 @@ export interface CredentialDisabledEvent {
 	orgName?: string;
 }
 
+/** Fired when `AuthStorage.removeCredential` or `AuthStorage.remove` soft-deletes one or more credentials. */
+export interface CredentialRemovedEvent {
+	type: "credential_removed";
+	/** Provider id the removed credential(s) belonged to. */
+	provider: string;
+	/** Pre-removal snapshot of every credential removed by the call. */
+	credentials: CredentialSummary[];
+}
+
 // ============================================================================
 // MCP Events
 // ============================================================================
@@ -1146,6 +1156,7 @@ export type ExtensionEvent =
 	| TodoReminderEvent
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
+	| CredentialRemovedEvent
 	| McpNotificationEvent
 	| UserBashEvent
 	| UserPythonEvent
@@ -1330,6 +1341,7 @@ export interface ExtensionAPI {
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
+	on(event: "credential_removed", handler: ExtensionHandler<CredentialRemovedEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;

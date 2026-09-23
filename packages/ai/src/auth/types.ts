@@ -20,6 +20,7 @@ import type {
 	UsageResetCredit,
 	UsageResetCredits,
 } from "../usage";
+import type { CredentialSummary } from "./credential-catalog";
 
 /** Default remaining quota protected for accounts without an explicit policy override. */
 export const DEFAULT_USAGE_RESERVE_PCT = 10;
@@ -322,6 +323,19 @@ export interface CredentialDisabledEvent {
 	orgName?: string;
 }
 
+/**
+ * Event payload describing one or more credentials that were just removed
+ * (soft-deleted with the {@link DELETED_BY_USER_CAUSE} tombstone). Fired by
+ * {@link CredentialsApi.removeById} (one row) and {@link CredentialsApi.remove}
+ * (every row of a provider). `credentials` is the pre-removal
+ * {@link CredentialSummary} snapshot — `active`/`pinned` are computed with no
+ * session in view, since removal is not scoped to one session.
+ */
+export interface CredentialRemovedEvent {
+	provider: string;
+	credentials: CredentialSummary[];
+}
+
 /** Configuration supplied when constructing credential storage. */
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
@@ -346,6 +360,11 @@ export type AuthStorageOptions = {
 	 * (uninteresting hygiene).
 	 */
 	onCredentialDisabled?: (event: CredentialDisabledEvent) => void | Promise<void>;
+	/**
+	 * Optional callback fired when {@link AuthStorage.removeCredential} or
+	 * {@link AuthStorage.remove} soft-deletes one or more credentials.
+	 */
+	onCredentialRemoved?: (event: CredentialRemovedEvent) => void | Promise<void>;
 	/**
 	 * Override OAuth refresh. When set, `AuthStorage` calls this instead of the
 	 * per-provider local refresh function. Receives the credential id so the
@@ -749,6 +768,14 @@ export interface CredentialsApi {
 	 * @returns A function that removes this listener from the subscriber set.
 	 */
 	onDisabled(listener: (event: CredentialDisabledEvent) => void | Promise<void>): () => void;
+	/**
+	 * Subscribe to {@link CredentialRemovedEvent}s. Same fan-out, error-isolation, and
+	 * no-subscriber replay contract as {@link CredentialsApi.onDisabled}.
+	 *
+	 * @param listener Callback invoked with each removal event. May be sync or async.
+	 * @returns A function that removes this listener from the subscriber set.
+	 */
+	onRemoved(listener: (event: CredentialRemovedEvent) => void | Promise<void>): () => void;
 	/**
 	 * Reload credentials from storage.
 	 */

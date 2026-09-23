@@ -35,7 +35,12 @@ import type {
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 } from "../usage";
-import { ensureCredentialCatalogColumns, migrateAuthSchemaV8ToV9, SqliteCredentialCatalog } from "./credential-catalog";
+import {
+	ensureCredentialCatalogColumns,
+	isPurgeableApiKeyCause,
+	migrateAuthSchemaV8ToV9,
+	SqliteCredentialCatalog,
+} from "./credential-catalog";
 
 // 5 min stale tolerance. Anthropic / OpenAI rate-limit /usage hard at the IP
 // level so we can't fetch all N credentials every cycle; with a long cache
@@ -1394,7 +1399,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 			for (const row of disabledRows) {
 				if (hasActiveApiKey && row.credential_type === "api_key") {
-					this.#hardDeleteStmt.run(row.id);
+					// ccw: a key the user disabled stays until the user removes it.
+					if (isPurgeableApiKeyCause(row.disabled_cause)) this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
 				const identityKey = resolveRowCredentialIdentityKey(provider, row);

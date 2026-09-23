@@ -769,7 +769,7 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 		}
 	});
 
-	it("allows multiple OAuth accounts to coexist and replaces legacy api_key rows on OAuth login", async () => {
+	it("allows multiple OAuth accounts to coexist; a legacy api_key that was enabled before login stays enabled", async () => {
 		if (!tempDir) throw new Error("test setup failed");
 
 		const dbPath = path.join(tempDir, "login-upgrade.db");
@@ -811,12 +811,13 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				onPrompt: async () => "",
 			});
 
-			// Legacy api_key should be gone/replaced, and first oauth account is active.
-			// getApiKey should now return the first OAuth access token (since the api_key is gone).
+			// The legacy api_key was enabled before this login, so AuthStorage.login
+			// re-enables it after the upstream upsert's disable — the first oauth
+			// account is active and getApiKey still prefers it over the pooled key.
 			expect(await authStorage.keys.get("unit-login-upgrade")).toBe("access-token-1");
 			const firstRows = readStoredIdentityRows(dbPath, "unit-login-upgrade");
 			expect(firstRows).toEqual([
-				{ identity_key: null, disabled_cause: "replaced by oauth login" },
+				{ identity_key: null, disabled_cause: null },
 				{ identity_key: "email:user-1@example.com", disabled_cause: null },
 			]);
 
@@ -833,10 +834,11 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				onPrompt: async () => "",
 			});
 
-			// Both OAuth accounts should coexist! No accounts should be disabled
+			// Both OAuth accounts coexist, and the legacy api_key — enabled again before
+			// this second login — is restored a second time.
 			const secondRows = readStoredIdentityRows(dbPath, "unit-login-upgrade");
 			expect(secondRows).toEqual([
-				{ identity_key: null, disabled_cause: "replaced by oauth login" },
+				{ identity_key: null, disabled_cause: null },
 				{ identity_key: "email:user-1@example.com", disabled_cause: null },
 				{ identity_key: "email:user-2@example.com", disabled_cause: null },
 			]);

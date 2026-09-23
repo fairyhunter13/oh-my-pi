@@ -183,6 +183,17 @@ export class SessionAffinity implements SessionsApi {
 
 		if (this.overridden(provider, sessionId)) return undefined;
 
+		// The session's strict pin, else the provider's default row, outranks the
+		// sticky: a resumed session or a removal that fell back to another row must
+		// route through the row the user actually chose, not whichever OAuth row
+		// happened to load first.
+		const preferredCredential = this.preferred(provider, sessionId);
+		if (preferredCredential) {
+			if (preferredCredential.type !== "oauth") return undefined;
+			const resolved = allCredentials[preferredCredential.index];
+			if (resolved?.type === "oauth") return resolved;
+		}
+
 		// Prefer the session-sticky credential when available.
 		const sessionPref = this.get(provider, sessionId);
 		// If the session has been routed to a stored API key, do not inject OAuth account_uuid.
