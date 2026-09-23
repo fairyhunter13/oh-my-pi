@@ -2,7 +2,8 @@
  * Get the API key or OAuth token for a provider.
  */
 
-import { PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
+import { type CredentialSummary, PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
@@ -11,7 +12,7 @@ import { isAuthenticated, ModelRegistry } from "../config/model-registry";
 import { refreshStoredManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthCredentialProfile } from "../mcp/oauth-flow";
 import { discoverAuthStorage } from "../sdk";
-import type { AuthStorage } from "../session/auth-storage";
+import type { AuthStorage, OAuthAccountSummary } from "../session/auth-storage";
 import { getAvailableAuthMethods } from "../web/search/providers/perplexity-auth";
 
 async function resolveManagedMcpOAuthToken(
@@ -46,6 +47,65 @@ async function resolveManagedMcpOAuthToken(
 	return credential.access;
 }
 
+interface TokenEntry {
+	id: number;
+	kind: "oauth" | "api_key";
+	/** Label, else OAuth identity or API-key hint. Never the key. */
+	text: string;
+	marks: string[];
+}
+
+/**
+ * `--list` rows: enabled OAuth accounts first, in `oauth.accounts()` order so
+ * `--account N` keeps its numbering, then every other stored row (API keys,
+ * disabled OAuth) in id order. A store without a credential catalog lists OAuth only.
+ */
+function listTokenEntries(
+	authStorage: AuthStorage,
+	provider: string,
+	accounts: OAuthAccountSummary[],
+): TokenEntry[] {
+	let summaries: CredentialSummary[] = [];
+	try {
+		summaries = authStorage.listCredentials(provider);
+	} catch (error) {
+		// No credential catalog (e.g. a remote broker store): OAuth accounts only.
+		if (!(error instanceof AIError.ConfigurationError)) throw error;
+	}
+	const byId = new Map(summaries.map(summary => [summary.id, summary]));
+	const marksOf = (summary: CredentialSummary | undefined): string[] => {
+		if (!summary) return [];
+		const marks: string[] = [];
+		if (summary.isDefault) marks.push("default");
+		if (summary.pinned) marks.push("pinned");
+		if (summary.disabled) marks.push(`disabled: ${summary.disabled}`);
+		return marks;
+	};
+	const entries: TokenEntry[] = accounts.map(acct => {
+		const base =
+			acct.email ?? acct.accountId ?? acct.projectId ?? acct.enterpriseUrl ?? `credential #${acct.credentialId}`;
+		const org = acct.orgName ?? acct.orgId;
+		const summary = byId.get(acct.credentialId);
+		return {
+			id: acct.credentialId,
+			kind: "oauth",
+			text: summary?.label ?? (org && org !== base ? `${base} (${org})` : base),
+			marks: marksOf(summary),
+		};
+	});
+	const listed = new Set(entries.map(entry => entry.id));
+	for (const summary of summaries) {
+		if (listed.has(summary.id)) continue;
+		entries.push({
+			id: summary.id,
+			kind: summary.kind,
+			text: summary.label ?? (summary.kind === "api_key" ? (summary.hint ?? "api key") : (summary.identity ?? "oauth")),
+			marks: marksOf(summary),
+		});
+	}
+	return entries;
+}
+
 export default class Token extends Command {
 	static description = commandHelp.description;
 	static args = {
@@ -66,11 +126,13 @@ export default class Token extends Command {
 		}),
 		account: Flags.integer({
 			char: "a",
-			description: "Select the Nth OAuth account (1-based) in stored order instead of the round-robin default",
+			description:
+				"Select the Nth OAuth account (1-based, as --list numbers it) instead of the round-robin default; API keys are not selectable",
 		}),
 		list: Flags.boolean({
 			char: "l",
-			description: "List the provider's OAuth accounts (index + identity) and exit",
+			description:
+				"List the provider's stored credentials (OAuth accounts first, then API keys and disabled rows) and exit",
 			default: false,
 		}),
 	};
@@ -79,7 +141,7 @@ export default class Token extends Command {
 		"# Get API key for Anthropic\n  omp token anthropic",
 		"# Get raw Copilot credential JSON\n  omp token github-copilot --raw",
 		"# Force refresh and get Gemini CLI token\n  omp token google-gemini-cli --force-refresh",
-		"# List Anthropic OAuth accounts\n  omp token anthropic --list",
+		"# List Anthropic credentials (OAuth accounts and API keys)\n  omp token anthropic --list",
 		"# Get the 2nd Anthropic OAuth account's token\n  omp token anthropic --account 2",
 	];
 
@@ -107,27 +169,35 @@ export default class Token extends Command {
 		try {
 			if (flags.list || flags.account !== undefined) {
 				const accounts = authStorage.oauth.accounts(provider);
-				if (accounts.length === 0) {
-					process.stderr.write(`${chalk.red(`No OAuth accounts found for provider "${providerName}".`)}\n`);
-					process.stderr.write("--account/--list select among OAuth accounts; this provider has none stored.\n");
-					process.exitCode = 1;
-					return;
-				}
+				const entries = listTokenEntries(authStorage, provider, accounts);
 				if (flags.list) {
-					for (const acct of accounts) {
-						const base =
-							acct.email ??
-							acct.accountId ??
-							acct.projectId ??
-							acct.enterpriseUrl ??
-							`credential #${acct.credentialId}`;
-						const org = acct.orgName ?? acct.orgId;
-						const label = org && org !== base ? `${base} (${org})` : base;
-						process.stdout.write(`${acct.position + 1}. ${label}\n`);
+					if (entries.length === 0) {
+						process.stderr.write(`${chalk.red(`No stored credentials found for provider "${providerName}".`)}\n`);
+						process.exitCode = 1;
+						return;
+					}
+					for (const [index, entry] of entries.entries()) {
+						const marks = entry.marks.length > 0 ? ` · ${entry.marks.join(", ")}` : "";
+						process.stdout.write(`${index + 1}. #${entry.id} ${entry.text} · ${entry.kind}${marks}\n`);
 					}
 					return;
 				}
+				if (accounts.length === 0) {
+					process.stderr.write(`${chalk.red(`No OAuth accounts found for provider "${providerName}".`)}\n`);
+					process.stderr.write("--account selects among OAuth accounts; this provider has none stored.\n");
+					process.exitCode = 1;
+					return;
+				}
 				const n = flags.account;
+				const other = n !== undefined && n > accounts.length ? entries[n - 1] : undefined;
+				if (other) {
+					const what = other.kind === "api_key" ? "an API key" : "a disabled OAuth account";
+					process.stderr.write(
+						`${chalk.red(`entry ${n} is ${what} (#${other.id}); --account selects OAuth accounts only (1-${accounts.length}).`)}\n`,
+					);
+					process.exitCode = 1;
+					return;
+				}
 				if (n === undefined || n < 1 || n > accounts.length) {
 					process.stderr.write(
 						`${chalk.red(`Invalid --account ${n ?? "(missing)"}.`)} Provider "${providerName}" has ${accounts.length} OAuth account(s) (1-${accounts.length}).\n`,
