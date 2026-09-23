@@ -150,8 +150,8 @@ export class CredentialPool implements CredentialsApi {
 		return rows;
 	}
 
-	/** Persist a login-entered API key. */
-	async storeLoginApiKey(provider: string, key: string): Promise<void> {
+	/** Persist a login-entered API key. Returns the row id it landed on. */
+	async storeLoginApiKey(provider: string, key: string): Promise<number | undefined> {
 		const credential: ApiKeyCredential = { type: "api_key", key, source: "login" };
 		const stored = await this.#store.upsertAuthCredential(provider, credential);
 		this.replace(
@@ -159,6 +159,7 @@ export class CredentialPool implements CredentialsApi {
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
 		this.reset(provider);
+		return stored.find(entry => entry.credential.type === "api_key" && entry.credential.key === key)?.id;
 	}
 
 	/**
@@ -671,7 +672,8 @@ export class CredentialPool implements CredentialsApi {
 		return rows;
 	}
 
-	async upsertOAuth(provider: string, credential: OAuthCredential): Promise<void> {
+	/** Upsert an OAuth credential. Returns the stored row id it landed on (by identity key). */
+	async upsertOAuth(provider: string, credential: OAuthCredential): Promise<number | undefined> {
 		const prospectiveCredentials = this.dedupe(provider, [
 			...this.#store.listAuthCredentials(provider).map(entry => entry.credential),
 			credential,
@@ -687,6 +689,12 @@ export class CredentialPool implements CredentialsApi {
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
 		this.reset(provider);
+		const identityKey = resolveCredentialIdentityKey(provider, credential);
+		if (identityKey === null) return undefined;
+		return stored.find(
+			entry =>
+				entry.credential.type === "oauth" && resolveCredentialIdentityKey(provider, entry.credential) === identityKey,
+		)?.id;
 	}
 
 	/**

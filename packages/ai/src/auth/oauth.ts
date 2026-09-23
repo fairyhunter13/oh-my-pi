@@ -28,6 +28,9 @@ import type {
 	AuthCredentialSnapshotEntry,
 } from "./types";
 
+/** {@link OAuthAccounts.refreshCredentials} default: refresh a row expiring within 5 minutes. */
+const REFRESH_CREDENTIALS_DEFAULT_SKEW_MS = 5 * 60_000;
+
 type StoredOAuthSelection = {
 	credentialId: number;
 	credential: OAuthCredential;
@@ -94,8 +97,8 @@ export class OAuthAccounts implements OAuthApi {
 			if (!result) {
 				return undefined;
 			}
-			await this.#deps.pool.storeLoginApiKey(provider, result);
-			return { type: "api_key" };
+			const credentialId = await this.#deps.pool.storeLoginApiKey(provider, result);
+			return { type: "api_key", credentialId };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant
 		// lifetime (Anthropic) need it to surface re-login deadlines, and token
@@ -124,7 +127,7 @@ export class OAuthAccounts implements OAuthApi {
 						.map(row => row.id),
 				)
 			: undefined;
-		await this.#deps.pool.upsertOAuth(storageProvider, newCredential);
+		const credentialId = await this.#deps.pool.upsertOAuth(storageProvider, newCredential);
 		if (catalog && priorEnabledApiKeyIds && priorEnabledApiKeyIds.size > 0) {
 			let restoredAny = false;
 			for (const row of catalog.list(storageProvider)) {
@@ -145,6 +148,7 @@ export class OAuthAccounts implements OAuthApi {
 			accountId: newCredential.accountId,
 			orgId: newCredential.orgId,
 			orgName: newCredential.orgName,
+			credentialId,
 		};
 	}
 
@@ -382,5 +386,57 @@ export class OAuthAccounts implements OAuthApi {
 		options: StoredOAuthRefreshOptions<T>,
 	): Promise<StoredOAuthRefreshResult<T>> {
 		return this.#deps.refresher.refreshStored(provider, options);
+	}
+
+	/**
+	 * Refresh every active OAuth row across every provider through
+	 * {@link OAuthAccounts.refresh}, so single-flight, the durable lease and
+	 * CAS-disable all apply exactly as a manual refresh would.
+	 *
+	 * Without `force`, only rows expiring within `skewMs` (default 5 min) are
+	 * attempted. A row whose provider has no refresh implementation is
+	 * reported in `skipped`, never attempted or disabled.
+	 */
+	async refreshCredentials(options?: {
+		provider?: string;
+		force?: boolean;
+		skewMs?: number;
+	}): Promise<{ refreshed: number[]; failed: Array<{ id: number; error: string }>; skipped: number[] }> {
+		// The rows in memory are a snapshot: a CLI opens with none, and another process may
+		// have logged in since. Refresh what the store holds now.
+		await this.#deps.pool.reload();
+		const skewMs = options?.skewMs ?? REFRESH_CREDENTIALS_DEFAULT_SKEW_MS;
+		const force = options?.force ?? false;
+		const deadline = Date.now() + skewMs;
+		const skipped: number[] = [];
+		const targets: number[] = [];
+		for (const provider of this.#deps.pool.providers()) {
+			if (options?.provider !== undefined && provider !== options.provider) continue;
+			for (const entry of this.#deps.pool.entries(provider)) {
+				if (entry.credential.type !== "oauth") continue;
+				if (!force) {
+					const expires = entry.credential.expires;
+					if (typeof expires === "number" && Number.isFinite(expires) && expires > deadline) continue;
+				}
+				if (!this.#deps.refresher.hasRefreshImplementation(provider)) {
+					skipped.push(entry.id);
+					continue;
+				}
+				targets.push(entry.id);
+			}
+		}
+		const refreshed: number[] = [];
+		const failed: Array<{ id: number; error: string }> = [];
+		await Promise.all(
+			targets.map(async id => {
+				try {
+					await this.refresh(id);
+					refreshed.push(id);
+				} catch (error) {
+					failed.push({ id, error: String(error) });
+				}
+			}),
+		);
+		return { refreshed, failed, skipped };
 	}
 }

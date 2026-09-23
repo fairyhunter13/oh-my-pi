@@ -528,6 +528,8 @@ export interface OAuthLoginIdentity {
 	accountId?: string;
 	orgId?: string;
 	orgName?: string;
+	/** The stored row id `login` upserted; lets callers name/pin/refresh this exact credential. */
+	credentialId?: number;
 }
 
 /** Failure while resolving access to one OAuth account. */
@@ -1058,6 +1060,20 @@ export interface OAuthApi {
 		provider: string,
 		options: StoredOAuthRefreshOptions<T>,
 	): Promise<StoredOAuthRefreshResult<T>>;
+	/**
+	 * Refresh every active OAuth row across every provider through
+	 * {@link AuthStorage.oauth.refresh}, so single-flight, the durable
+	 * lease and CAS-disable all apply exactly as a manual refresh would.
+	 *
+	 * Without `force`, only rows expiring within `skewMs` (default 5 min) are
+	 * attempted. A row whose provider has no refresh implementation is
+	 * reported in `skipped`, never attempted or disabled.
+	 */
+	refreshCredentials(options?: {
+		provider?: string;
+		force?: boolean;
+		skewMs?: number;
+	}): Promise<{ refreshed: number[]; failed: Array<{ id: number; error: string }>; skipped: number[] }>;
 }
 
 /** Session credential affinity operations. */
@@ -1092,6 +1108,13 @@ export interface SessionsApi {
 	 * headroom, before considering a model/provider fallback.
 	 */
 	release(provider: string, sessionId: string): boolean;
+	/**
+	 * Promote the session's current sticky routing to a durable strict pin, so a later
+	 * usage-limit or auth-failure rotation no longer moves this session off the row it
+	 * already used. No-op, returns `undefined`: the session already has a pin; a runtime
+	 * key or a counted config key overrides the session; or no sticky row is recorded yet.
+	 */
+	adopt(provider: string, sessionId: string): number | undefined;
 }
 
 /** Usage reporting, observation, and provider configuration. */

@@ -2,9 +2,10 @@
  * Background OAuth refresh loop for the auth-broker server.
  *
  * Iterates active OAuth credentials at `refreshIntervalMs` cadence, refreshing
- * any whose `expires - Date.now() < refreshSkewMs`. Refresh single-flight
- * lives in {@link AuthStorage} so manual and background refreshes share the
- * same upstream attempt.
+ * any whose `expires - Date.now() < refreshSkewMs`. Delegates to
+ * {@link AuthStorage.oauth.refreshCredentials}, so single-flight, the durable
+ * lease and CAS-disable all live in one place shared by manual and background
+ * refreshes.
  * Definitively-failed credentials (invalid_grant / bare 401, not a network
  * blip) are torn down inside {@link AuthStorage.oauth.refresh} via a
  * compare-and-set disable — only when no peer/login rotated the row first — so
@@ -81,38 +82,20 @@ export class AuthBrokerRefresher {
 		this.#running = true;
 		this.#nextSweepAt = this.#now();
 		try {
-			await this.#storage.credentials.reload();
-			const snapshot = this.#storage.credentials.snapshot();
-			const now = this.#now();
-			const deadline = now + this.#refreshSkewMs;
-			const targets: number[] = [];
-			for (const entry of snapshot.credentials) {
-				if (entry.credential.type !== "oauth") continue;
-				const expires = entry.credential.expires;
-				if (typeof expires !== "number" || !Number.isFinite(expires)) continue;
-				if (expires > deadline) continue;
-				targets.push(entry.id);
+			const result = await this.#storage.oauth.refreshCredentials({ skewMs: this.#refreshSkewMs });
+			for (const { id, error } of result.failed) {
+				if (isDefinitiveOAuthFailure(error)) {
+					// AuthStorage.oauth.refresh already CAS-disabled the row
+					// (unless a peer/login rotated it first, in which case the live
+					// credential is intentionally kept). Nothing to do here but record it.
+					logger.warn("auth-broker refresh failed definitively", { id, error });
+				} else {
+					logger.debug("auth-broker refresh failed (transient)", { id, error });
+				}
 			}
-			await Promise.all(targets.map(id => this.#refreshOne(id)));
 		} finally {
 			this.#running = false;
 			this.#nextSweepAt = this.#now() + this.#refreshIntervalMs;
-		}
-	}
-
-	async #refreshOne(id: number): Promise<void> {
-		try {
-			await this.#storage.oauth.refresh(id);
-		} catch (error) {
-			const errorMsg = String(error);
-			if (isDefinitiveOAuthFailure(errorMsg)) {
-				// AuthStorage.oauth.refresh already CAS-disabled the row
-				// (unless a peer/login rotated it first, in which case the live
-				// credential is intentionally kept). Nothing to do here but record it.
-				logger.warn("auth-broker refresh failed definitively", { id, error: errorMsg });
-			} else {
-				logger.debug("auth-broker refresh failed (transient)", { id, error: errorMsg });
-			}
 		}
 	}
 }

@@ -56,6 +56,7 @@ import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 export type { CredentialSummary } from "./auth/credential-catalog";
+export { suggestCredentialLabel } from "./auth/credential-catalog";
 export * from "./auth/store";
 export * from "./auth/types";
 
@@ -390,7 +391,7 @@ export class AuthStorage {
 		const pinnedId = this.#affinity.strictPin(provider, sessionId);
 		if (pinnedId === undefined && this.#overrides.configCounts(provider)) return {};
 		return {
-			activeId: this.#affinity.preferred(provider, sessionId)?.credentialId,
+			activeId: this.#affinity.preferredOrSole(provider, sessionId)?.credentialId,
 			pinnedId,
 		};
 	}

@@ -283,3 +283,42 @@ export function describeCredential(summary: CredentialSummary | undefined, id: n
 	const name = summary.label ? `"${summary.label}"` : (summary.identity ?? summary.hint ?? summary.kind);
 	return `#${id} ${name}`;
 }
+
+/**
+ * Un-suffixed candidate name for a row that has no explicit label: an oauth
+ * row's identity, with the org appended when a sibling row of the same
+ * provider shares that identity; an api_key row's `<provider> key <hint>`.
+ */
+function baseCredentialLabel(row: CredentialSummary, rows: readonly CredentialSummary[]): string {
+	if (row.kind !== "oauth") return `${row.provider} key ${row.hint ?? ""}`.trim();
+	const identity = row.identity ?? row.hint ?? row.kind;
+	const sameIdentityElsewhere = rows.some(
+		other =>
+			other.id !== row.id && other.provider === row.provider && other.kind === "oauth" && other.identity === identity,
+	);
+	return sameIdentityElsewhere && row.org ? `${identity} (${row.org})` : identity;
+}
+
+/**
+ * A name for a row with no explicit label: the existing label wins outright;
+ * otherwise {@link baseCredentialLabel}, suffixed ` 2`, ` 3`, … until it is
+ * unique (case-insensitive) among the provider's other rows' effective names.
+ */
+export function suggestCredentialLabel(rows: CredentialSummary[], row: CredentialSummary): string {
+	if (row.label) return row.label;
+	const base = baseCredentialLabel(row, rows);
+	// Only earlier rows (by array order) count as "taken": with no other tiebreaker,
+	// two rows computing the same base must not both defer to each other.
+	const rowPosition = rows.findIndex(other => other.id === row.id);
+	const taken = new Set(
+		rows
+			.filter(
+				(other, index) => other.id !== row.id && other.provider === row.provider && (rowPosition === -1 || index < rowPosition),
+			)
+			.map(other => (other.label ?? baseCredentialLabel(other, rows)).toLowerCase()),
+	);
+	if (!taken.has(base.toLowerCase())) return base;
+	let suffix = 2;
+	while (taken.has(`${base} ${suffix}`.toLowerCase())) suffix += 1;
+	return `${base} ${suffix}`;
+}

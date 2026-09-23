@@ -5,6 +5,7 @@ export type { AuthGatewayBootOptions, ModelResolver } from "./auth-gateway/dispa
 export * from "./auth-gateway/types";
 export * from "./auth-retry";
 export * from "./auth-storage";
+export * from "./auth/credential-refresh";
 export * from "./error/rate-limit";
 export * from "./embeddings";
 export * from "./images";

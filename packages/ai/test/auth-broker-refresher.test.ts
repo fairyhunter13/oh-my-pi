@@ -36,7 +36,7 @@ describe("AuthBrokerRefresher", () => {
 	});
 
 	test("refreshes credentials inside the skew window", async () => {
-		const now = 1_700_000_000_000;
+		const now = Date.now();
 		const skew = 5 * 60_000;
 		// Credential expires in 1 minute — well within the 5-min skew → must refresh.
 		await store!.saveOAuth("anthropic", {
@@ -68,7 +68,7 @@ describe("AuthBrokerRefresher", () => {
 	});
 
 	test("does not refresh credentials safely outside the skew window", async () => {
-		const now = 1_700_000_000_000;
+		const now = Date.now();
 		const skew = 5 * 60_000;
 		await store!.saveOAuth("anthropic", {
 			access: "ok",
@@ -95,7 +95,7 @@ describe("AuthBrokerRefresher", () => {
 	});
 
 	test("disables credentials on definitive failure (invalid_grant)", async () => {
-		const now = 1_700_000_000_000;
+		const now = Date.now();
 		await store!.saveOAuth("anthropic", {
 			access: "old",
 			refresh: "old-refresh",
@@ -124,7 +124,7 @@ describe("AuthBrokerRefresher", () => {
 	});
 
 	test("keeps credentials on transient failures (timeout/network)", async () => {
-		const now = 1_700_000_000_000;
+		const now = Date.now();
 		await store!.saveOAuth("anthropic", {
 			access: "old",
 			refresh: "old-refresh",
@@ -151,7 +151,7 @@ describe("AuthBrokerRefresher", () => {
 	});
 
 	test("does not disable a credential a peer rotated during the refresh (CAS)", async () => {
-		const now = 1_700_000_000_000;
+		const now = Date.now();
 		await store!.saveOAuth("anthropic", {
 			access: "stale",
 			refresh: "stale-refresh",

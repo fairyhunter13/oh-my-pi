@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
+import { getProviderDefinition } from "../registry";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
@@ -571,5 +572,18 @@ export class OAuthRefresher {
 			};
 		}
 		throw new AIError.ValidationError(`No credential with id=${id}`);
+	}
+
+	/**
+	 * True while some refresh implementation is registered for `provider`: a
+	 * store-level or caller override refreshes every provider it is handed, a
+	 * runtime-registered custom OAuth provider, or a built-in provider
+	 * definition with `refreshToken`. Rows of an unregistered provider (e.g. an
+	 * MCP server's OAuth grant, refreshed by its own caller-driven path) have
+	 * none of these and must be skipped rather than failed or disabled.
+	 */
+	hasRefreshImplementation(provider: string): boolean {
+		if (this.#deps.override || this.#deps.store.refreshOAuthCredential) return true;
+		return Boolean(getOAuthProvider(provider)?.refreshToken) || Boolean(getProviderDefinition(provider)?.refreshToken);
 	}
 }

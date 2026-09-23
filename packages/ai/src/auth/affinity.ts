@@ -187,7 +187,7 @@ export class SessionAffinity implements SessionsApi {
 		// sticky: a resumed session or a removal that fell back to another row must
 		// route through the row the user actually chose, not whichever OAuth row
 		// happened to load first.
-		const preferredCredential = this.preferred(provider, sessionId);
+		const preferredCredential = this.preferredOrSole(provider, sessionId);
 		if (preferredCredential) {
 			if (preferredCredential.type !== "oauth") return undefined;
 			const resolved = allCredentials[preferredCredential.index];
@@ -306,6 +306,48 @@ export class SessionAffinity implements SessionsApi {
 		const stored = this.#pool.entries(provider);
 		const index = stored.findIndex(entry => entry.id === id);
 		return index === -1 ? undefined : { type: stored[index]!.credential.type, index, credentialId: id };
+	}
+
+	/**
+	 * {@link SessionAffinity.preferred}, plus the provider's only usable row when there is no
+	 * pin and no default: a sole row is unambiguous — there is nothing else it could mean to
+	 * prefer. Display (`AuthStorage.listCredentials`'s `active` mark) and OAuth identity
+	 * attribution ({@link SessionAffinity.activeOAuth}) use this; actual request resolution
+	 * (`KeyCascade.get`, `CredentialSelector.resolveOAuth`) deliberately does not, so a sole
+	 * row's precedence against an env var / config key / login-sourced row is unchanged.
+	 */
+	preferredOrSole(
+		provider: string,
+		sessionId: string | undefined,
+	): { type: AuthCredential["type"]; index: number; credentialId: number } | undefined {
+		const direct = this.preferred(provider, sessionId);
+		if (direct) return direct;
+		const stored = this.#pool.entries(provider);
+		if (stored.length !== 1) return undefined;
+		return { type: stored[0]!.credential.type, index: 0, credentialId: stored[0]!.id };
+	}
+
+	/**
+	 * Promote the session's current sticky routing (set by the `KeyCascade.get` /
+	 * `OAuthAccounts.access` call that served the last request) to a durable strict pin, so a
+	 * later usage-limit or auth-failure rotation no longer moves this session off the row
+	 * it already used — "exactly one active credential per session" once the caller (the
+	 * turn-completion hook, not every resolve) decides the session has settled.
+	 *
+	 * No-op, returns `undefined`: the session already has a pin; a runtime key or a
+	 * counted config key overrides the session (nothing to pin); or no sticky row is
+	 * recorded yet (the request was served by env/fallback, never touched a stored row).
+	 */
+	adopt(provider: string, sessionId: string): number | undefined {
+		if (!sessionId) return undefined;
+		if (this.overridden(provider, sessionId)) return undefined;
+		if (this.strictPin(provider, sessionId) !== undefined) return undefined;
+		const sticky = this.get(provider, sessionId);
+		if (!sticky) return undefined;
+		const credentialId = sticky.credentialId ?? this.#pool.entries(provider)[sticky.index]?.id;
+		if (credentialId === undefined) return undefined;
+		this.#writeStrictPin(provider, sessionId, credentialId);
+		return credentialId;
 	}
 
 	#writeStrictPin(provider: string, sessionId: string, credentialId: number): void {
