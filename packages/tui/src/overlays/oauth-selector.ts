@@ -1,4 +1,4 @@
-import type { CredentialsApi, KeysApi } from "@oh-my-pi/pi-ai";
+import type { KeysApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import {
@@ -20,7 +20,6 @@ const OAUTH_SELECTOR_MAX_VISIBLE = 10;
 
 /** Credential presence and provenance needed by the provider picker. */
 export interface OAuthSelectorAuthSource {
-	readonly credentials: Pick<CredentialsApi, "has">;
 	readonly keys: Pick<KeysApi, "source">;
 }
 
@@ -50,7 +49,6 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#visibleCount = 0;
 	/** Visible list window, shrunk by {@link setMaxHeight} on short screens. */
 	#maxVisible = OAUTH_SELECTOR_MAX_VISIBLE;
-	#mode: "login" | "logout";
 	#authStorage: OAuthSelectorAuthSource;
 	#onSelectCallback: (providerId: string) => void;
 	#onCancelCallback: () => void;
@@ -62,7 +60,6 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#spinnerInterval?: NodeJS.Timeout;
 	#validationGeneration: number = 0;
 	constructor(
-		mode: "login" | "logout",
 		authStorage: OAuthSelectorAuthSource,
 		onSelect: (providerId: string) => void,
 		onCancel: () => void,
@@ -72,8 +69,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			requestRender?: () => void;
 		},
 	) {
-		super(mode === "login" ? "Select provider to login" : "Select provider to logout");
-		this.#mode = mode;
+		super("Select provider to login");
 		this.#authStorage = authStorage;
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
@@ -116,31 +112,23 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#updateList();
 	}
 	#hasSelectableAuth(providerId: string): boolean {
-		return this.#mode === "logout"
-			? this.#authStorage.credentials.has(providerId)
-			: this.#authStorage.keys.source(providerId) !== undefined;
+		return this.#authStorage.keys.source(providerId) !== undefined;
 	}
 
 	#loadProviders(disabledProviders: readonly string[] = []): void {
 		const providers = getOAuthProviders();
-		if (this.#mode === "logout") {
-			// Logout stays unfiltered by `disabledProviders`: a now-disabled
-			// provider may still hold stored credentials worth removing.
-			this.#menu.setItems(providers.filter(provider => this.#hasSelectableAuth(provider.id)));
-		} else {
-			const disabled = new Set(disabledProviders);
-			// Hide a login entry when either its own id or the provider id it
-			// stores credentials under is disabled, so alias logins (e.g.
-			// `openai-codex-device` ⇒ `openai-codex`) disappear alongside the
-			// model provider they authenticate.
-			this.#menu.setItems(
-				providers.filter(
-					provider =>
-						!disabled.has(provider.id) &&
-						!(provider.storeCredentialsAs && disabled.has(provider.storeCredentialsAs)),
-				),
-			);
-		}
+		const disabled = new Set(disabledProviders);
+		// Hide a login entry when either its own id or the provider id it
+		// stores credentials under is disabled, so alias logins (e.g.
+		// `openai-codex-device` ⇒ `openai-codex`) disappear alongside the
+		// model provider they authenticate.
+		this.#menu.setItems(
+			providers.filter(
+				provider =>
+					!disabled.has(provider.id) &&
+					!(provider.storeCredentialsAs && disabled.has(provider.storeCredentialsAs)),
+			),
+		);
 	}
 
 	#startValidation(): void {
@@ -336,11 +324,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 		if (total === 0) {
 			const message =
-				this.#menu.items.length === 0
-					? this.#mode === "login"
-						? "No OAuth providers available"
-						: "No stored provider credentials to log out"
-					: "No matching providers";
+				this.#menu.items.length === 0 ? "No OAuth providers available" : "No matching providers";
 			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
 		}
 		if (this.#statusMessage) {

@@ -21,6 +21,7 @@ import * as readline from "node:readline";
 import {
 	type AuthCredential,
 	AuthStorage,
+	type CredentialSummary,
 	getEnvApiKey,
 	getOAuthProviders,
 	listProvidersWithEnvKey,
@@ -39,7 +40,7 @@ import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
+import { pickOAuthProvider, promptLine, runTerminalOAuthLogin } from "./oauth-terminal";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -62,6 +63,12 @@ export interface AuthBrokerCommandArgs {
 		includeEnv?: boolean;
 		/** `migrate`: required `--from-local` source. Reserved for future sources. */
 		fromLocal?: boolean;
+		/** `logout`: select one stored credential by label (case-insensitive), exact identity/email, or `#id`. */
+		account?: string;
+		/** `logout`: select every stored credential for the provider. */
+		all?: boolean;
+		/** `logout`: skip the removal confirmation prompt. */
+		yes?: boolean;
 	};
 }
 
@@ -283,27 +290,189 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 	}
 }
 
-async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
-	let providerArg = flags.provider;
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+/** Short display name for a stored row, matching `/providers` → Credentials. */
+function credentialDisplayName(row: CredentialSummary): string {
+	return row.label ?? row.identity ?? row.hint ?? `#${row.id}`;
+}
+
+/** One line for a stored row: `name  kind · default · disabled · identity/hint · org · #id`. */
+function formatCredentialRow(row: CredentialSummary): string {
+	const detail = [
+		row.kind === "oauth" ? "subscription" : "api key",
+		row.isDefault ? "default" : null,
+		row.disabled ? "disabled" : null,
+		row.label ? (row.identity ?? row.hint) : null,
+		row.org,
+		`#${row.id}`,
+	].filter(Boolean);
+	return `${credentialDisplayName(row)}  ${detail.join(" · ")}`;
+}
+
+/**
+ * Resolve `--account <selector>` against one provider's stored rows.
+ * `#<id>` matches the row id. Anything else matches the label
+ * (case-insensitive; unique per provider, so it never ambiguates) first,
+ * then the identity (oauth email/account id, case-insensitive) — which CAN
+ * ambiguate when two rows share the same identity.
+ */
+export function resolveCredentialSelector(rows: readonly CredentialSummary[], selector: string): CredentialSummary {
+	const trimmed = selector.trim();
+	if (trimmed.startsWith("#")) {
+		const id = Number.parseInt(trimmed.slice(1), 10);
+		if (Number.isNaN(id)) throw new Error(`Invalid credential selector '${selector}'`);
+		const row = rows.find(candidate => candidate.id === id);
+		if (!row) throw new Error(`No credential #${id} for this provider`);
+		return row;
+	}
+	const wanted = trimmed.toLowerCase();
+	const byLabel = rows.filter(row => row.label?.toLowerCase() === wanted);
+	if (byLabel.length === 1) return byLabel[0];
+	if (byLabel.length > 1) {
+		throw new Error(`'${selector}' matches ${byLabel.length} credentials by name; use --account '#<id>' instead`);
+	}
+	const byIdentity = rows.filter(row => row.identity?.toLowerCase() === wanted);
+	if (byIdentity.length === 1) return byIdentity[0];
+	if (byIdentity.length > 1) {
+		throw new Error(
+			`'${selector}' matches ${byIdentity.length} credentials by identity; use --account '#<id>' instead`,
+		);
+	}
+	throw new Error(`No credential matches '${selector}'`);
+}
+
+interface StoredProviderCount {
+	provider: string;
+	total: number;
+	disabled: number;
+}
+
+async function confirmCredentialRemoval(message: string, flags: AuthBrokerCommandArgs["flags"]): Promise<boolean> {
+	if (flags.yes) return true;
+	if (process.stdin.isTTY !== true) {
+		throw new Error(`${message} Refusing to remove without confirmation; pass --yes to skip the prompt.`);
+	}
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 	try {
+		const answer = await promptLine(rl, `${message} [y/N] `);
+		return ["y", "yes"].includes(answer.trim().toLowerCase());
+	} finally {
+		rl.close();
+	}
+}
+
+async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	const authStorage = await AuthStorage.create(getAgentDbPath());
+	try {
+		let providerArg = flags.provider;
 		if (!providerArg) {
-			const stored = store.listProviders();
-			if (stored.length === 0) {
+			const counts = new Map<string, StoredProviderCount>();
+			for (const summary of authStorage.listCredentials()) {
+				const entry = counts.get(summary.provider) ?? { provider: summary.provider, total: 0, disabled: 0 };
+				entry.total += 1;
+				if (summary.disabled) entry.disabled += 1;
+				counts.set(summary.provider, entry);
+			}
+			if (counts.size === 0) {
 				process.stdout.write("No credentials stored.\n");
 				return;
 			}
-			const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-			try {
-				providerArg = stored[await pickIndex(rl, "Select a provider to logout:", stored)];
-			} finally {
-				rl.close();
+			if (process.stdin.isTTY !== true) {
+				const known = [...counts.keys()].sort().join(", ");
+				throw new Error(
+					`Multiple providers have stored credentials (${known}). Pass one: auth-broker logout <provider>`,
+				);
 			}
+			providerArg = await pickStoredProviderInteractively(
+				[...counts.values()].sort((a, b) => a.provider.localeCompare(b.provider)),
+			);
 		}
-		await store.deleteAuthCredentials(providerArg, "logged out by user");
-		process.stdout.write(`Logged out of ${providerArg}\n`);
+
+		const rows = authStorage.listCredentials(providerArg);
+		if (rows.length === 0) {
+			process.stdout.write(`No credentials stored for ${providerArg}.\n`);
+			return;
+		}
+
+		let selected: CredentialSummary[];
+		if (flags.all) {
+			selected = rows;
+		} else if (flags.account) {
+			selected = [resolveCredentialSelector(rows, flags.account)];
+		} else if (process.stdin.isTTY === true) {
+			selected = await pickStoredCredentialsInteractively(providerArg, rows);
+		} else {
+			throw new Error(`${providerArg} has ${rows.length} stored credential(s). Pass --account <selector> or --all.`);
+		}
+
+		for (const row of selected) {
+			const name = credentialDisplayName(row);
+			const confirmed = await confirmCredentialRemoval(`Remove ${name} (#${row.id}) from ${providerArg}?`, flags);
+			if (!confirmed) {
+				process.stdout.write(`Kept ${name} (#${row.id}).\n`);
+				continue;
+			}
+			const removed = await authStorage.removeCredential(providerArg, row.id);
+			process.stdout.write(
+				removed
+					? `Removed ${name} (#${row.id}) from ${providerArg}.\n`
+					: `${name} (#${row.id}) was already gone.\n`,
+			);
+		}
+
+		const remaining = authStorage.listCredentials(providerArg);
+		if (remaining.length === 0) {
+			process.stdout.write(`No credentials remain for ${providerArg}.\n`);
+		} else {
+			process.stdout.write(`${remaining.length} credential(s) remain for ${providerArg}:\n`);
+			for (const row of remaining) process.stdout.write(`  ${formatCredentialRow(row)}\n`);
+		}
 	} finally {
-		store.close();
+		authStorage.close();
+	}
+}
+
+async function pickStoredProviderInteractively(entries: StoredProviderCount[]): Promise<string> {
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	try {
+		process.stdout.write("Select a provider to logout:\n\n");
+		for (let i = 0; i < entries.length; i++) {
+			const entry = entries[i];
+			const count = `${entry.total} credential${entry.total === 1 ? "" : "s"}`;
+			const disabled = entry.disabled > 0 ? `, ${entry.disabled} disabled` : "";
+			process.stdout.write(`  ${i + 1}. ${entry.provider} (${count}${disabled})\n`);
+		}
+		process.stdout.write("\n");
+		const choice = await promptLine(rl, `Enter number (1-${entries.length}): `);
+		const index = Number.parseInt(choice, 10) - 1;
+		if (Number.isNaN(index) || index < 0 || index >= entries.length) {
+			throw new Error(`Invalid selection: ${choice}`);
+		}
+		return entries[index].provider;
+	} finally {
+		rl.close();
+	}
+}
+
+async function pickStoredCredentialsInteractively(
+	provider: string,
+	rows: CredentialSummary[],
+): Promise<CredentialSummary[]> {
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	try {
+		process.stdout.write(`Select a credential to remove from ${provider}:\n\n`);
+		for (let i = 0; i < rows.length; i++) {
+			process.stdout.write(`  ${i + 1}. ${formatCredentialRow(rows[i])}\n`);
+		}
+		process.stdout.write("\n");
+		const choice = await promptLine(rl, `Enter number (1-${rows.length}) or 'a' for all: `);
+		if (choice.trim().toLowerCase() === "a") return rows;
+		const index = Number.parseInt(choice, 10) - 1;
+		if (Number.isNaN(index) || index < 0 || index >= rows.length) {
+			throw new Error(`Invalid selection: ${choice}`);
+		}
+		return [rows[index]];
+	} finally {
+		rl.close();
 	}
 }
 

@@ -308,12 +308,8 @@ async function generateTitleOnlineWithModels(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage.oauth
-					.accounts(model.provider, credentialSourceSessionId)
-					.find(account => account.active);
-				if (foregroundCredential) {
-					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
-				}
+				// The foreground's pin (any kind) and sticky, so a title never spends another account.
+				registry.authStorage.sessions.inherit(credentialSourceSessionId, sessionId);
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);
 			if (!apiKey) {

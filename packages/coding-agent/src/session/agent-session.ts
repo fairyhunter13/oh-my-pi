@@ -279,7 +279,6 @@ import type {
 	RoleModelCycleResult,
 	SendUserMessageOptions,
 	SessionHandoffOptions,
-	SessionOAuthAccountList,
 	SessionStats,
 	SteerOptions,
 	UsageFallbackConfirmer,
@@ -11216,27 +11215,6 @@ export class AgentSession implements SettingsScope {
 		return [...selectors].sort((left, right) => left.localeCompare(right));
 	}
 
-	/** List stored OAuth accounts for the current model provider and mark this session's active account. */
-	async listCurrentProviderOAuthAccounts(): Promise<SessionOAuthAccountList | undefined> {
-		const provider = this.model?.provider;
-		if (!provider) return undefined;
-		const authStorage = this.#modelRegistry.authStorage;
-		await authStorage.credentials.reload();
-		return {
-			provider,
-			accounts: authStorage.oauth.accounts(provider, this.sessionId),
-		};
-	}
-
-	/**
-	 * Pin a stored OAuth account to the current model provider for this session.
-	 * Returns false while streaming or when the credential is no longer available.
-	 */
-	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
-		const provider = this.model?.provider;
-		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
-	}
 
 	/**
 	 * Redeem one provider-selected saved rate-limit reset for an exact stored

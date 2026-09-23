@@ -1,16 +1,32 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import type { CredentialSummary } from "@oh-my-pi/pi-ai";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { toSessionPinAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
 
 beforeAll(async () => {
 	await initTheme();
 });
 
-const accounts = toSessionPinAccounts([
-	{ position: 0, credentialId: 11, email: "first@example.com", active: false },
-	{ position: 1, credentialId: 12, email: "second@example.com", active: true },
-]);
+function row(overrides: Partial<CredentialSummary> & { id: number }): CredentialSummary {
+	return {
+		provider: "anthropic",
+		kind: "oauth",
+		label: null,
+		identity: null,
+		hint: null,
+		disabled: null,
+		isDefault: false,
+		active: false,
+		pinned: false,
+		org: null,
+		...overrides,
+	};
+}
+
+const rows: CredentialSummary[] = [
+	row({ id: 11, identity: "first@example.com" }),
+	row({ id: 12, identity: "second@example.com", active: true }),
+];
 
 describe("SessionAccountSelectorComponent", () => {
 	it("handles navigation, selection, Escape, and Ctrl+C while focused", () => {
@@ -18,8 +34,10 @@ describe("SessionAccountSelectorComponent", () => {
 		let cancellations = 0;
 		const component = new SessionAccountSelectorComponent(
 			"Anthropic",
-			accounts,
-			account => selected.push(account.credentialId),
+			rows,
+			selection => {
+				if (selection.kind === "row") selected.push(selection.row.id);
+			},
 			() => {
 				cancellations += 1;
 			},
@@ -31,7 +49,7 @@ describe("SessionAccountSelectorComponent", () => {
 
 		const escapeComponent = new SessionAccountSelectorComponent(
 			"Anthropic",
-			accounts,
+			rows,
 			() => {},
 			() => {
 				cancellations += 1;
@@ -41,7 +59,7 @@ describe("SessionAccountSelectorComponent", () => {
 
 		const ctrlCComponent = new SessionAccountSelectorComponent(
 			"Anthropic",
-			accounts,
+			rows,
 			() => {},
 			() => {
 				cancellations += 1;
@@ -49,5 +67,35 @@ describe("SessionAccountSelectorComponent", () => {
 		);
 		ctrlCComponent.handleInput("\x03");
 		expect(cancellations).toBe(2);
+	});
+
+	it("offers 'Use the pool' only when a row is pinned, and it clears the pin", () => {
+		const pinnedRows: CredentialSummary[] = [row({ id: 21, identity: "a@example.com", pinned: true, active: true })];
+		let selection: string | undefined;
+		const component = new SessionAccountSelectorComponent(
+			"Anthropic",
+			pinnedRows,
+			result => {
+				selection = result.kind;
+			},
+			() => {},
+		);
+		// Navigate past the single row to "Use the pool" and select it.
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		expect(selection).toBe("pool");
+
+		let noPinSelection: string | undefined;
+		const noPinComponent = new SessionAccountSelectorComponent(
+			"Anthropic",
+			[row({ id: 22, identity: "b@example.com" })],
+			result => {
+				noPinSelection = result.kind;
+			},
+			() => {},
+		);
+		noPinComponent.handleInput("\x1b[B");
+		noPinComponent.handleInput("\n");
+		expect(noPinSelection).toBe("row");
 	});
 });

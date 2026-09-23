@@ -7,14 +7,14 @@ type RuntimeHarness = {
 	runtime: { ctx: InteractiveModeContext };
 	getStatus: () => string | undefined;
 	getWarning: () => string | undefined;
-	getSelectorMode: () => "login" | "logout" | undefined;
+	getSelectorOpened: () => boolean;
 	getSelectorProvider: () => string | undefined;
 };
 
 const createRuntimeHarness = (manualInput: OAuthManualInputManager): RuntimeHarness => {
 	let statusMessage: string | undefined;
 	let warningMessage: string | undefined;
-	let selectorMode: "login" | "logout" | undefined;
+	let selectorOpened = false;
 	let selectorProvider: string | undefined;
 	const ctx = {
 		oauthManualInput: manualInput,
@@ -27,8 +27,8 @@ const createRuntimeHarness = (manualInput: OAuthManualInputManager): RuntimeHarn
 		showWarning: (message: string) => {
 			warningMessage = message;
 		},
-		showOAuthSelector: async (mode: "login" | "logout", providerId?: string) => {
-			selectorMode = mode;
+		showOAuthSelector: async (providerId?: string) => {
+			selectorOpened = true;
 			selectorProvider = providerId;
 		},
 	} as InteractiveModeContext;
@@ -39,7 +39,7 @@ const createRuntimeHarness = (manualInput: OAuthManualInputManager): RuntimeHarn
 		},
 		getStatus: () => statusMessage,
 		getWarning: () => warningMessage,
-		getSelectorMode: () => selectorMode,
+		getSelectorOpened: () => selectorOpened,
 		getSelectorProvider: () => selectorProvider,
 	};
 };
@@ -54,7 +54,7 @@ describe("/login slash command", () => {
 		const handled = await executeBuiltinSlashCommand(`/login ${callbackUrl}`, harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(harness.getSelectorMode()).toBeUndefined();
+		expect(harness.getSelectorOpened()).toBe(false);
 		expect(harness.getStatus()).toBe("OAuth callback received; completing login…");
 		expect(await pending).toBe(callbackUrl);
 	});
@@ -66,7 +66,7 @@ describe("/login slash command", () => {
 		const handled = await executeBuiltinSlashCommand("/login", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(harness.getSelectorMode()).toBe("login");
+		expect(harness.getSelectorOpened()).toBe(true);
 	});
 
 	it("routes /login kagi to direct provider login", async () => {
@@ -76,7 +76,7 @@ describe("/login slash command", () => {
 		const handled = await executeBuiltinSlashCommand("/login kagi", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(harness.getSelectorMode()).toBe("login");
+		expect(harness.getSelectorOpened()).toBe(true);
 		expect(harness.getSelectorProvider()).toBe("kagi");
 	});
 
@@ -87,7 +87,7 @@ describe("/login slash command", () => {
 		const handled = await executeBuiltinSlashCommand("/login parallel", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(harness.getSelectorMode()).toBe("login");
+		expect(harness.getSelectorOpened()).toBe(true);
 		expect(harness.getSelectorProvider()).toBe("parallel");
 	});
 
@@ -98,7 +98,7 @@ describe("/login slash command", () => {
 		const handled = await executeBuiltinSlashCommand("/login http://localhost/callback", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(harness.getSelectorMode()).toBeUndefined();
+		expect(harness.getSelectorOpened()).toBe(false);
 		expect(harness.getWarning()).toBe("No OAuth login is waiting for a manual callback.");
 	});
 });

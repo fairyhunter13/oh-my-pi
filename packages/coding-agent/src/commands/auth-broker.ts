@@ -50,6 +50,11 @@ export default class AuthBroker extends Command {
 			description: "Also upload OAuth from local SQLite during migrate (default skips them)",
 		}),
 		"dry-run": Flags.boolean({ description: "Print actions without executing (import / login --via / migrate)" }),
+		account: Flags.string({
+			description: "Select one stored credential by label, identity/email, or #id (logout)",
+		}),
+		all: Flags.boolean({ description: "Select every stored credential for the provider (logout)" }),
+		yes: Flags.boolean({ description: "Skip the removal confirmation prompt (logout)", char: "y" }),
 	};
 
 	static examples = [
@@ -61,7 +66,9 @@ export default class AuthBroker extends Command {
 		"# Local login (run on the broker host)\n  omp auth-broker login anthropic",
 		"# Interactive provider selection\n  omp auth-broker login",
 		"# Remote login over SSH tunnel\n  omp auth-broker login anthropic --via=user@broker",
-		"# Log out of a provider (interactive without provider arg)\n  omp auth-broker logout anthropic",
+		"# Log out of a provider (interactive picker for provider and credential)\n  omp auth-broker logout anthropic",
+		"# Remove one credential by name or id, no prompt\n  omp auth-broker logout anthropic --account work --yes",
+		"# Remove every stored credential for a provider\n  omp auth-broker logout anthropic --all --yes",
 		"# Import a CLIProxyAPI auth dump\n  omp auth-broker import ~/.cliproxy/auth",
 		"# Import a single CLIProxyAPI JSON, overriding the provider mapping\n  omp auth-broker import ~/.cliproxy/auth/claude-foo.json --provider anthropic",
 		"# Preview a migration from local store + env vars to the configured broker\n  omp auth-broker migrate --from-local --include-env --dry-run",
@@ -92,6 +99,9 @@ export default class AuthBroker extends Command {
 				includeEnv: flags["include-env"],
 				includeOauth: flags["include-oauth"],
 				dryRun: flags["dry-run"],
+				account: flags.account,
+				all: flags.all,
+				yes: flags.yes,
 			},
 		};
 		await initTheme();

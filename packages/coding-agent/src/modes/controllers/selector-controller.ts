@@ -40,7 +40,6 @@ import {
 } from "../../extensibility/plugins/marketplace";
 import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentHubOpenOptions, InteractiveModeContext } from "../../modes/types";
-import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
 	createForeignSessionStore,
@@ -56,10 +55,9 @@ import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
-import { toLogoutAccounts } from "../../slash-commands/helpers/logout";
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
+import type { CredentialSummary } from "@oh-my-pi/pi-ai";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { matchSessionPinSelector } from "../../slash-commands/helpers/session-pin";
 import { loadDailyActivity } from "../../stats/activity-client";
 import {
 	AUTO_THINKING,
@@ -90,8 +88,12 @@ import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extensi
 import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui/overlays/extensions/live-tool-session";
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
+import type {
+	CredentialLogoutComponent as CredentialLogoutComponentType,
+	CredentialLogoutProvider,
+	CredentialLogoutTarget,
+} from "@oh-my-pi/pi-tui/overlays/credential-logout";
 import type { LoginDialogComponent as LoginDialogComponentType } from "@oh-my-pi/pi-tui/overlays/login-dialog";
-import type { LogoutAccountSelectorComponent as LogoutAccountSelectorComponentType } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import type {
 	ModelHubComponent as ModelHubComponentType,
 	ModelRoleSelectionScope,
@@ -103,7 +105,8 @@ import { PluginSelectorComponent } from "@oh-my-pi/pi-tui/overlays/plugin-select
 import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
 import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
-import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
+import { SessionAccountSelectorComponent, type SessionPinSelection } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -149,7 +152,7 @@ interface ProviderAuthUiModules {
 	PASTE_CODE_LOGIN_PROVIDERS: typeof PasteCodeLoginProviders;
 	getOAuthProviders: typeof GetOAuthProviders;
 	LoginDialogComponent: typeof LoginDialogComponentType;
-	LogoutAccountSelectorComponent: typeof LogoutAccountSelectorComponentType;
+	CredentialLogoutComponent: typeof CredentialLogoutComponentType;
 	OAuthSelectorComponent: typeof OAuthSelectorComponentType;
 }
 
@@ -159,8 +162,7 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 		PASTE_CODE_LOGIN_PROVIDERS: require("@oh-my-pi/pi-ai/index.js").PASTE_CODE_LOGIN_PROVIDERS,
 		getOAuthProviders: require("@oh-my-pi/pi-ai/registry/oauth/index.js").getOAuthProviders,
 		LoginDialogComponent: require("@oh-my-pi/pi-tui/overlays/login-dialog.js").LoginDialogComponent,
-		LogoutAccountSelectorComponent: require("@oh-my-pi/pi-tui/overlays/logout-account-selector.js")
-			.LogoutAccountSelectorComponent,
+		CredentialLogoutComponent: require("@oh-my-pi/pi-tui/overlays/credential-logout.js").CredentialLogoutComponent,
 		OAuthSelectorComponent: require("@oh-my-pi/pi-tui/overlays/oauth-selector.js").OAuthSelectorComponent,
 	};
 }
@@ -192,18 +194,6 @@ export class SelectorController {
 		this.#defaultRoleMutationTail = previous.then(() => promise);
 		await previous;
 		return resolve;
-	}
-
-	async #refreshOAuthProviderAuthState(): Promise<void> {
-		const { getOAuthProviders } = loadProviderAuthUi();
-		const oauthProviders = getOAuthProviders();
-		await Promise.all(
-			oauthProviders.map(provider =>
-				this.ctx.session.modelRegistry
-					.getApiKeyForProvider(provider.id, this.ctx.session.sessionId)
-					.catch(() => undefined),
-			),
-		);
 	}
 
 	/**
@@ -1867,13 +1857,79 @@ export class SelectorController {
 		}
 	}
 
-	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
+	/** Provider list + row grouping for the `/logout` picker. */
+	#buildCredentialLogoutState(): {
+		providers: CredentialLogoutProvider[];
+		rowsByProvider: Map<string, readonly CredentialSummary[]>;
+	} {
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const sessionId = this.ctx.session.sessionId;
+		const { getOAuthProviders } = loadProviderAuthUi();
+		const rows = authStorage.listCredentials(undefined, sessionId);
+		const rowsByProvider = new Map<string, CredentialSummary[]>();
+		for (const row of rows) rowsByProvider.set(row.provider, [...(rowsByProvider.get(row.provider) ?? []), row]);
+
+		const oauthProviders = getOAuthProviders();
+		const known = new Set<string>(rowsByProvider.keys());
+		for (const model of this.ctx.session.modelRegistry.getAvailable("all")) known.add(model.provider);
+		for (const info of oauthProviders) known.add(info.storeCredentialsAs ?? info.id);
+
+		const providers: CredentialLogoutProvider[] = [];
+		for (const id of [...known].sort(
+			(a, b) => Number(rowsByProvider.has(b)) - Number(rowsByProvider.has(a)) || a.localeCompare(b),
+		)) {
+			const name = oauthProviders.find(candidate => (candidate.storeCredentialsAs ?? candidate.id) === id)?.name ?? id;
+			const own = rowsByProvider.get(id);
+			if (own && own.length > 0) {
+				const oauth = own.filter(row => row.kind === "oauth").length;
+				const keys = own.length - oauth;
+				const disabled = own.filter(row => row.disabled).length;
+				const summary = [
+					oauth > 0 ? `${oauth} subscription${oauth === 1 ? "" : "s"}` : "",
+					keys > 0 ? `${keys} API key${keys === 1 ? "" : "s"}` : "",
+					disabled > 0 ? `${disabled} disabled` : "",
+				]
+					.filter(Boolean)
+					.join(" · ");
+				providers.push({ id, name, summary, disabled: false });
+				continue;
+			}
+			const source = authStorage.keys.describe(id, sessionId);
+			if (!source) continue;
+			const origin = authStorage.keys.source(id);
+			const where =
+				origin?.kind === "env"
+					? `env ${origin.envVar ?? "variables"}`
+					: origin?.kind === "config"
+						? "models.yml apiKey"
+						: origin?.kind === "runtime"
+							? "--api-key"
+							: source;
+			providers.push({ id, name, summary: `not stored: ${where}. Remove it there.`, disabled: true });
+		}
+		return { providers, rowsByProvider };
+	}
+
+	async #handleCredentialLogoutTarget(target: CredentialLogoutTarget): Promise<void> {
 		try {
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			const removed = await authStorage.credentials.removeById(providerId, account.credentialId);
-			if (!removed) {
-				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
-				return;
+			const sessionId = this.ctx.session.sessionId;
+			let removedName: string;
+			let anyPinned: boolean;
+			if (target.kind === "row") {
+				const removed = await authStorage.removeCredential(target.provider, target.row.id, { sessionId });
+				if (!removed) {
+					this.ctx.showError(
+						`Logout skipped: ${credentialName(target.row)} is no longer stored for ${target.provider}.`,
+					);
+					return;
+				}
+				removedName = `${credentialName(target.row)} (#${target.row.id})`;
+				anyPinned = target.row.pinned;
+			} else {
+				await authStorage.remove(target.provider, { sessionId });
+				removedName = `all ${target.rows.length} credentials`;
+				anyPinned = target.rows.some(row => row.pinned);
 			}
 
 			// Provider-scoped online refresh so the removed credential's stale
@@ -1881,32 +1937,42 @@ export class SelectorController {
 			// default all-provider `online-if-uncached` would reuse the fresh
 			// authoritative cache row and keep showing models the credential
 			// unlocked (#5780). Other providers are left untouched.
-			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
+			await this.ctx.session.modelRegistry.refreshProvider(target.provider, "online");
 			const block = new TranscriptBlock();
 			block.addChild(
 				new Text(
+					theme.fg("success", `${theme.status.success} Logged out ${removedName} from ${target.provider}.`),
+					1,
+					0,
+				),
+			);
+			if (anyPinned) {
+				block.addChild(new Text(theme.fg("warning", "This session was pinned to it; the pin is cleared."), 1, 0));
+			}
+			const nowActive = authStorage.listCredentials(target.provider, sessionId).find(row => row.active);
+			const remainingSource = nowActive
+				? `${credentialName(nowActive)} (#${nowActive.id})`
+				: authStorage.keys.describe(target.provider, sessionId);
+			block.addChild(
+				new Text(
 					theme.fg(
-						"success",
-						`${theme.status.success} Successfully logged out ${account.label} from ${providerId}`,
+						"dim",
+						remainingSource
+							? `${target.provider} now uses ${remainingSource}.`
+							: `${target.provider} has no credential left.`,
 					),
 					1,
 					0,
 				),
 			);
-			block.addChild(new Text(theme.fg("dim", `Credential removed from ${getAgentDbPath()}`), 1, 0));
-			const remainingSource = authStorage.keys.describe(providerId, this.ctx.session.sessionId);
-			if (remainingSource) {
-				block.addChild(
-					new Text(theme.fg("warning", `${providerId} is still authenticated via ${remainingSource}`), 1, 0),
-				);
-			}
+
 			this.ctx.present(block);
 		} catch (error: unknown) {
 			this.ctx.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
-	async #showOAuthLogoutAccountSelector(providerId: string): Promise<void> {
+	async showCredentialLogout(providerId?: string): Promise<void> {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
 		try {
 			await authStorage.credentials.reload();
@@ -1916,26 +1982,32 @@ export class SelectorController {
 			);
 			return;
 		}
-		const { getOAuthProviders, LogoutAccountSelectorComponent } = loadProviderAuthUi();
-		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
-		const accounts = toLogoutAccounts(providerId, authStorage.credentials.list(providerId), {
-			activeIdentity: authStorage.oauth.identity(providerId, this.ctx.session.sessionId),
-			activeApiKey: authStorage.keys.source(providerId)?.kind === "api_key",
-		});
-		if (accounts.length === 0) {
-			const source = authStorage.keys.describe(providerId, this.ctx.session.sessionId);
-			const suffix = source ? ` Current auth comes from ${source}; remove that source to log out.` : "";
-			this.ctx.showError(`Logout skipped: no stored credentials for ${providerId}.${suffix}`);
-			return;
+		const { providers, rowsByProvider } = this.#buildCredentialLogoutState();
+
+		if (providerId) {
+			const rows = rowsByProvider.get(providerId);
+			if (!rows || rows.length === 0) {
+				const known = providers.some(entry => entry.id === providerId);
+				if (!known) {
+					this.ctx.showWarning(`Unknown provider: ${providerId}`);
+					return;
+				}
+				const source = authStorage.keys.describe(providerId, this.ctx.session.sessionId);
+				const suffix = source ? ` Current auth comes from ${source}; remove that source to log out.` : "";
+				this.ctx.showError(`Logout skipped: no stored credentials for ${providerId}.${suffix}`);
+				return;
+			}
 		}
 
 		this.showSelector(done => {
-			const selector = new LogoutAccountSelectorComponent(
-				provider?.name ?? providerId,
-				accounts,
-				account => {
+			const { CredentialLogoutComponent } = loadProviderAuthUi();
+			const selector = new CredentialLogoutComponent(
+				providers,
+				rowsByProvider,
+				providerId,
+				target => {
 					done();
-					void this.#handleCredentialLogout(providerId, account);
+					void this.#handleCredentialLogoutTarget(target);
 				},
 				() => {
 					done();
@@ -1946,41 +2018,20 @@ export class SelectorController {
 		});
 	}
 
-	async showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
+	async showOAuthSelector(providerId?: string): Promise<void> {
 		if (providerId) {
-			if (mode === "login") {
-				await this.#handleOAuthLogin(providerId);
-			} else {
-				await this.#showOAuthLogoutAccountSelector(providerId);
-			}
+			await this.#handleOAuthLogin(providerId);
 			return;
 		}
 
-		const { getOAuthProviders, OAuthSelectorComponent } = loadProviderAuthUi();
-		if (mode === "logout") {
-			await this.#refreshOAuthProviderAuthState();
-			const oauthProviders = getOAuthProviders();
-			const loggedInProviders = oauthProviders.filter(provider =>
-				this.ctx.session.modelRegistry.authStorage.credentials.has(provider.id),
-			);
-			if (loggedInProviders.length === 0) {
-				this.ctx.showStatus("No stored provider credentials to log out. Remove env or config auth at its source.");
-				return;
-			}
-		}
-
 		this.showSelector(done => {
+			const { OAuthSelectorComponent } = loadProviderAuthUi();
 			const selector = new OAuthSelectorComponent(
-				mode,
 				this.ctx.session.modelRegistry.authStorage,
 				async (selectedProviderId: string) => {
 					selector.stopValidation();
 					done();
-					if (mode === "login") {
-						await this.#handleOAuthLogin(selectedProviderId);
-					} else {
-						await this.#showOAuthLogoutAccountSelector(selectedProviderId);
-					}
+					await this.#handleOAuthLogin(selectedProviderId);
 				},
 				() => {
 					selector.stopValidation();
@@ -2005,36 +2056,55 @@ export class SelectorController {
 		});
 	}
 
+	#applySessionPinSelection(provider: string, providerName: string, selection: SessionPinSelection): void {
+		const session = this.ctx.session;
+		const authStorage = session.modelRegistry.authStorage;
+		if (selection.kind === "pool") {
+			authStorage.clearSessionCredential(provider, session.sessionId);
+			this.ctx.showStatus(`This session uses the pool again for ${providerName}.`);
+		} else {
+			const name = credentialName(selection.row);
+			if (!authStorage.pinSessionCredential(provider, session.sessionId, selection.row.id)) {
+				this.ctx.showWarning(`${name} is no longer available to pin.`);
+				return;
+			}
+			this.ctx.showStatus(`Pinned ${name} to this session for ${providerName}.`);
+		}
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
+	}
+
 	async showSessionPinSelector(): Promise<void> {
 		const session = this.ctx.session;
 		if (session.isStreaming) {
 			this.ctx.showStatus("Cannot pin an account while the session is streaming.");
 			return;
 		}
-		this.ctx.showStatus("Loading provider accounts…", { dim: true });
-		let accountList: SessionOAuthAccountList | undefined;
-		try {
-			accountList = await session.listCurrentProviderOAuthAccounts();
-		} catch (error) {
-			this.ctx.showError(
-				`Could not load provider accounts: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			return;
-		}
-		if (!accountList) {
+		const provider = session.model?.provider;
+		if (!provider) {
 			this.ctx.showStatus("Select a model before pinning a provider account.");
 			return;
 		}
+		const authStorage = session.modelRegistry.authStorage;
+		this.ctx.showStatus("Loading provider credentials…", { dim: true });
+		try {
+			await authStorage.credentials.reload();
+		} catch (error) {
+			this.ctx.showError(
+				`Could not load stored credentials: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
 		const { getOAuthProviders } = loadProviderAuthUi();
-		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
-		const providerName = provider?.name ?? accountList.provider;
-		const accounts = toSessionPinAccounts(accountList.accounts);
-		if (accounts.length === 0) {
-			const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);
+		const providerInfo = getOAuthProviders().find(candidate => candidate.id === provider);
+		const providerName = providerInfo?.name ?? provider;
+		const rows = authStorage.listCredentials(provider, session.sessionId).filter(row => row.disabled === null);
+		if (rows.length === 0) {
+			const source = authStorage.keys.describe(provider, session.sessionId);
 			this.ctx.showStatus(
 				source
-					? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
-					: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
+					? `No stored credentials for ${providerName}. Current auth comes from ${source}.`
+					: `No stored credentials for ${providerName}. Use /login to add one.`,
 			);
 			return;
 		}
@@ -2042,16 +2112,10 @@ export class SelectorController {
 		this.showSelector(done => {
 			const selector = new SessionAccountSelectorComponent(
 				providerName,
-				accounts,
-				account => {
+				rows,
+				selection => {
 					done();
-					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
-						this.ctx.showWarning(`${account.label} is no longer available to pin.`);
-						return;
-					}
-					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
-					this.ctx.statusLine.invalidate();
-					this.ctx.ui.requestRender();
+					this.#applySessionPinSelection(provider, providerName, selection);
 				},
 				() => {
 					done();

@@ -1,5 +1,4 @@
 import type { AuthStorage, CredentialSummary } from "@oh-my-pi/pi-ai";
-import { OAUTH_LOGIN_REPLACED_CAUSE } from "@oh-my-pi/pi-ai/auth/credential-catalog";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthPrompt, OAuthProvider, OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import { formTheme } from "../../chrome/form-theme";
@@ -11,6 +10,7 @@ import { type SgrMouseEvent } from "../../mouse";
 import { getSelectListTheme, theme } from "../../theme/theme";
 import { type Component, Container } from "../../tui";
 import { wrapTextWithAnsi } from "../../utils";
+import { credentialItem, credentialName } from "./credential-format";
 import type { SetupSceneHost, SetupTab } from "./types";
 
 const MAX_VISIBLE = 10;
@@ -23,24 +23,6 @@ type View =
 	| { kind: "remove"; provider: string; id: number }
 	| { kind: "field"; provider: string; field: TextFormField }
 	| { kind: "login"; provider: string; oauth: OAuthProviderInfo };
-
-function credentialName(row: CredentialSummary): string {
-	return row.label ?? row.identity ?? row.hint ?? `#${row.id}`;
-}
-
-/** The name column holds only the name; marks lead the second column so a long name never hides them. */
-function credentialItem(row: CredentialSummary): SelectItem {
-	const detail = [
-		row.kind === "oauth" ? "subscription" : "API key",
-		row.active ? "active" : null,
-		row.isDefault ? "default" : null,
-		row.disabled ? "disabled" : null,
-		row.label ? (row.identity ?? row.hint) : null,
-		`#${row.id}`,
-		row.disabled,
-	].filter(Boolean);
-	return { value: `row:${row.id}`, label: credentialName(row), description: detail.join(" · ") };
-}
 
 /**
  * "Credentials" panel: every stored credential per provider (each OAuth
@@ -351,12 +333,13 @@ export class CredentialsTab implements SetupTab {
 	}
 
 	async #remove(provider: string, id: number): Promise<void> {
+		const row = this.#rows(provider).find(candidate => candidate.id === id);
 		const name = this.#describe(provider, id);
-		const removed = await this.#authStorage.removeCredential(provider, id);
+		const removed = await this.#authStorage.removeCredential(provider, id, { sessionId: this.#host.ctx.sessionId });
 		if (this.#disposed) return;
-		this.#show({ kind: "credentials", provider }, [
-			removed ? theme.fg("success", `Removed ${name}.`) : theme.fg("warning", `${name} was already gone.`),
-		]);
+		const status = removed ? [theme.fg("success", `Removed ${name}.`)] : [theme.fg("warning", `${name} was already gone.`)];
+		if (removed && row?.pinned) status.push(theme.fg("warning", "This session was pinned to it; the pin is cleared."));
+		this.#show({ kind: "credentials", provider }, status);
 	}
 
 	async #disable(provider: string, id: number): Promise<void> {
@@ -418,14 +401,9 @@ export class CredentialsTab implements SetupTab {
 		if (data === "\x1b" || data === "\x03") this.#loginAbort?.abort();
 	}
 
-	/** Upstream login, then re-enable the api_key rows that this login alone disabled. */
+	/** Upstream login. AuthStorage.login re-enables the api_key rows this login alone disabled. */
 	async #login(provider: string, oauth: OAuthProviderInfo): Promise<void> {
 		if (this.#loginAbort) return;
-		const enabledKeys = new Set(
-			this.#rows(provider)
-				.filter(row => row.kind === "api_key" && row.disabled === null)
-				.map(row => row.id),
-		);
 		const abort = new AbortController();
 		this.#loginAbort = abort;
 		this.#show({ kind: "login", provider, oauth }, [theme.fg("dim", "Starting OAuth flow…")]);
@@ -461,14 +439,9 @@ export class CredentialsTab implements SetupTab {
 				},
 				onManualCodeInput: () => prompt({ message: "Paste the authorization code (or full redirect URL):" }),
 			});
-			const restored = this.#rows(provider).filter(
-				row => enabledKeys.has(row.id) && row.disabled === OAUTH_LOGIN_REPLACED_CAUSE,
-			);
-			for (const row of restored) this.#authStorage.enableCredential(row.id);
 			await this.#host.ctx.refreshProvider(provider);
 			if (this.#disposed) return;
-			const kept = restored.length > 0 ? ` Kept ${restored.length} API key(s) enabled.` : "";
-			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added a ${oauth.name} subscription.${kept}`)]);
+			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added a ${oauth.name} subscription.`)]);
 		} catch (error) {
 			if (this.#disposed) return;
 			const message = abort.signal.aborted

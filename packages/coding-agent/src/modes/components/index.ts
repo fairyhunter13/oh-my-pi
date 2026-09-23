@@ -21,7 +21,6 @@ export * from "@oh-my-pi/pi-tui/chat/hook-message";
 export * from "@oh-my-pi/pi-tui/overlays/hook-selector";
 export * from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 export * from "@oh-my-pi/pi-tui/overlays/login-dialog";
-export * from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 export * from "@oh-my-pi/pi-tui/overlays/model-browser";
 export * from "@oh-my-pi/pi-tui/overlays/model-hub";
 export * from "@oh-my-pi/pi-tui/overlays/model-picker";

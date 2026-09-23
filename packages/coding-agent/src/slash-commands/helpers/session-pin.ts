@@ -1,41 +1,38 @@
-import type { OAuthAccountSummary } from "../../session/auth-storage";
-import { formatActiveAccountLabel } from "./active-oauth-account";
+import type { CredentialSummary } from "@oh-my-pi/pi-ai";
 
-import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+/** What a `/session pin` selector picked: one stored row, or the pool. */
+export type SessionPinSelection = { kind: "row"; row: CredentialSummary } | { kind: "pool" };
 
-/** Add stable user-facing labels to provider account summaries. */
-export function toSessionPinAccounts(accounts: readonly OAuthAccountSummary[]): SessionPinAccount[] {
-	return accounts.map(account => {
-		const enterpriseUrl = account.enterpriseUrl?.trim();
-		return {
-			...account,
-			label: (formatActiveAccountLabel(account) ?? enterpriseUrl) || `OAuth credential #${account.credentialId}`,
-		};
-	});
-}
-
-/** Match a `/session pin` selector by 1-based position or exact account identity. */
-export function matchSessionPinAccounts(accounts: readonly SessionPinAccount[], selector: string): SessionPinAccount[] {
-	const wanted = selector.trim().toLowerCase();
+/**
+ * Match a `/session pin` selector against usable rows (disabled rows already
+ * excluded by the caller). Accepts a label (case-insensitive), an exact
+ * identity/email, `#id`, the 1-based position in the listed order, `active`,
+ * or `pool` (clears the session's pin).
+ */
+export function matchSessionPinSelector(
+	rows: readonly CredentialSummary[],
+	selector: string,
+): SessionPinSelection[] {
+	const wanted = selector.trim();
 	if (!wanted) return [];
-	if (wanted === "active") return accounts.filter(account => account.active);
+	const lower = wanted.toLowerCase();
+	if (lower === "pool") return [{ kind: "pool" }];
+	if (lower === "active") return rows.filter(row => row.active).map(row => ({ kind: "row", row }));
 
+	if (/^#\d+$/.test(wanted)) {
+		const id = Number(wanted.slice(1));
+		const row = rows.find(candidate => candidate.id === id);
+		return row ? [{ kind: "row", row }] : [];
+	}
 	if (/^\d+$/.test(wanted)) {
-		const position = Number(wanted) - 1;
-		const positioned = accounts.find(account => account.position === position);
-		if (positioned) return [positioned];
+		const row = rows[Number(wanted) - 1];
+		return row ? [{ kind: "row", row }] : [];
 	}
 
-	return accounts.filter(account =>
-		[
-			account.label,
-			account.email,
-			account.accountId,
-			account.projectId,
-			account.enterpriseUrl,
-			account.orgId,
-			account.orgName,
-			`OAuth credential #${account.credentialId}`,
-		].some(value => value?.trim().toLowerCase() === wanted),
-	);
+	return rows
+		.filter(
+			row =>
+				(row.label && row.label.toLowerCase() === lower) || (row.identity && row.identity.toLowerCase() === lower),
+		)
+		.map(row => ({ kind: "row", row }));
 }

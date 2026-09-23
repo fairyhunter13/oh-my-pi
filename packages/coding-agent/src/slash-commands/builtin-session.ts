@@ -1,6 +1,6 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import type { AgentSession } from "../session/agent-session";
-import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -16,7 +16,7 @@ import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, toResetUsageAccounts } from "./helpers/reset-usage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
-import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
+import { matchSessionPinSelector } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
@@ -117,60 +117,70 @@ async function handleSessionPinCommand(
 		await output("Cannot pin an account while the session is streaming.");
 		return;
 	}
-	let accountList: SessionOAuthAccountList | undefined;
-	try {
-		accountList = await session.listCurrentProviderOAuthAccounts();
-	} catch (error) {
-		await output(`Could not load provider accounts: ${errorMessage(error)}`);
-		return;
-	}
-	if (!accountList) {
+	const provider = session.model?.provider;
+	if (!provider) {
 		await output("Select a model before pinning a provider account.");
 		return;
 	}
-	const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
-	const providerName = provider?.name ?? accountList.provider;
-	const accounts = toSessionPinAccounts(accountList.accounts);
-	if (accounts.length === 0) {
-		const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);
+	const authStorage = session.modelRegistry.authStorage;
+	try {
+		await authStorage.credentials.reload();
+	} catch (error) {
+		await output(`Could not load stored credentials: ${errorMessage(error)}`);
+		return;
+	}
+	const providerInfo = getOAuthProviders().find(candidate => candidate.id === provider);
+	const providerName = providerInfo?.name ?? provider;
+	const rows = authStorage.listCredentials(provider, session.sessionId).filter(row => row.disabled === null);
+	if (rows.length === 0) {
+		const source = authStorage.keys.describe(provider, session.sessionId);
 		await output(
 			source
-				? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
-				: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
+				? `No stored credentials for ${providerName}. Current auth comes from ${source}.`
+				: `No stored credentials for ${providerName}. Use /login to add one.`,
 		);
 		return;
 	}
 
 	const selector = arg.trim();
 	if (!selector) {
-		const lines = [`OAuth accounts for ${providerName}:`];
-		for (const account of accounts) {
-			lines.push(`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}`);
-		}
-		lines.push("", "Pin one with `/session pin <number|email|account id>`.");
+		const lines = [`Credentials for ${providerName}:`];
+		rows.forEach((row, index) => {
+			lines.push(`${index + 1}. ${credentialName(row)}${row.active ? " (active)" : ""}`);
+		});
+		lines.push("", "Pin one with `/session pin <number|label|email|#id>`, or `/session pin pool` to clear.");
 		await output(lines.join("\n"));
 		return;
 	}
 
-	const matches = matchSessionPinAccounts(accounts, selector);
+	const matches = matchSessionPinSelector(rows, selector);
 	if (matches.length === 0) {
-		await output(`No ${providerName} account matches "${selector}".`);
+		await output(`No ${providerName} credential matches "${selector}".`);
 		return;
 	}
 	if (matches.length > 1) {
 		await output(
-			`"${selector}" matches multiple ${providerName} accounts: ${matches
-				.map(account => `${account.position + 1}. ${account.label}`)
-				.join(", ")}. Use the account number.`,
+			`"${selector}" matches multiple ${providerName} credentials: ${matches
+				.map(match => {
+					const row = match.kind === "row" ? match.row : undefined;
+					return row ? `${rows.indexOf(row) + 1}. ${credentialName(row)}` : "pool";
+				})
+				.join(", ")}. Use the number or #id.`,
 		);
 		return;
 	}
-	const account = matches[0];
-	if (!account || !session.pinCurrentProviderOAuthAccount(account.credentialId)) {
-		await output(`${account?.label ?? selector} is no longer available to pin.`);
+	const match = matches[0];
+	if (!match) return;
+	if (match.kind === "pool") {
+		authStorage.clearSessionCredential(provider, session.sessionId);
+		await output(`This session uses the pool again for ${providerName}.`);
 		return;
 	}
-	await output(`Pinned ${account.label} to this session for ${providerName}.`);
+	if (!authStorage.pinSessionCredential(provider, session.sessionId, match.row.id)) {
+		await output(`${credentialName(match.row)} is no longer available to pin.`);
+		return;
+	}
+	await output(`Pinned ${credentialName(match.row)} to this session for ${providerName}.`);
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -579,7 +589,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						runtime.ctx.editor.setText("");
 						return;
 					}
-					void runtime.ctx.showOAuthSelector("login", matchedProvider.id);
+					void runtime.ctx.showOAuthSelector(matchedProvider.id);
 					runtime.ctx.editor.setText("");
 					return;
 				}
@@ -603,7 +613,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 
-			void runtime.ctx.showOAuthSelector("login");
+			void runtime.ctx.showOAuthSelector();
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -615,18 +625,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handleTui: (command, runtime) => {
 			const providerId = command.args.trim();
-			if (providerId) {
-				const matchedProvider = getOAuthProviders().find(provider => provider.id === providerId);
-				if (!matchedProvider) {
-					runtime.ctx.showWarning(`Unknown OAuth provider: ${providerId}`);
-					runtime.ctx.editor.setText("");
-					return;
-				}
-				void runtime.ctx.showOAuthSelector("logout", matchedProvider.id);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			void runtime.ctx.showOAuthSelector("logout");
+			void runtime.ctx.showCredentialLogout(providerId || undefined);
 			runtime.ctx.editor.setText("");
 		},
 	},

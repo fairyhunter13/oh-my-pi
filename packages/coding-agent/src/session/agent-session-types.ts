@@ -14,7 +14,6 @@ import type {
 	Message,
 	MessageAttribution,
 	Model,
-	OAuthAccountSummary,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
@@ -472,12 +471,6 @@ export interface SessionStats {
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;
 	contextUsage?: ContextUsage;
-}
-
-/** Stored OAuth accounts available to the current model provider. */
-export interface SessionOAuthAccountList {
-	provider: string;
-	accounts: OAuthAccountSummary[];
 }
 
 /** IDs for a newly created session and the session it replaced. */
