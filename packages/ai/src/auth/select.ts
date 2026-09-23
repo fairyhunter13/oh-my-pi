@@ -504,13 +504,15 @@ export class CredentialSelector {
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
 		await this.#deps.pool.adoptExternalChanges();
-		const credentials = this.#deps.pool
-			.credentials(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter(
-				(entry): entry is { credential: OAuthCredential; index: number } =>
-					entry.credential.type === "oauth" && this.#pinAdmits(provider, sessionId, entry.index),
-			);
+		const credentials = this.#pinAdmitted(
+			provider,
+			sessionId,
+			this.#deps.pool
+				.credentials(provider)
+				.map((credential, index) => ({ credential, index }))
+				.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth"),
+			options?.accountIds,
+		);
 		this.#deps.policies.validateFor(
 			provider,
 			credentials.map(entry => entry.credential),
@@ -843,10 +845,27 @@ export class CredentialSelector {
 		return undefined;
 	}
 
-	/** With a strict pin, only the pinned row may serve the session. */
-	#pinAdmits(provider: string, sessionId: string | undefined, index: number): boolean {
+	/**
+	 * With a strict pin, only the pinned row may serve the session. One exception: a model that
+	 * only other accounts serve (`accountIds`, from discovery) takes those accounts for this
+	 * request, unless the pin is exclusive (a binding's pin). The pin itself is not rewritten.
+	 */
+	#pinAdmitted<T extends { credential: OAuthCredential; index: number }>(
+		provider: string,
+		sessionId: string | undefined,
+		rows: T[],
+		accountIds: readonly string[] | undefined,
+	): T[] {
 		const pinnedId = this.#deps.affinity.strictPin(provider, sessionId);
-		return pinnedId === undefined || this.#deps.pool.entries(provider)[index]?.id === pinnedId;
+		if (pinnedId === undefined) return rows;
+		const entries = this.#deps.pool.entries(provider);
+		const pinned = rows.filter(row => entries[row.index]?.id === pinnedId);
+		if (!accountIds?.length || this.#deps.affinity.strictPinIsExclusive(provider, sessionId)) return pinned;
+		const eligible = new Set(accountIds);
+		const serves = (row: T) => row.credential.accountId !== undefined && eligible.has(row.credential.accountId);
+		if (pinned.some(serves)) return pinned;
+		const moved = rows.filter(serves);
+		return moved.length > 0 ? moved : pinned;
 	}
 
 	/**

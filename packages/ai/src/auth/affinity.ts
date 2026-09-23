@@ -26,8 +26,11 @@ export type SessionCredential = {
 export class SessionAffinity implements SessionsApi {
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
 	#sessionLastCredential: Map<string, Map<string, SessionCredential>> = new Map();
-	/** Strict pins: provider → sessionId → credential id, or null for a cached absence. */
-	#strictPins: Map<string, Map<string, number | null>> = new Map();
+	/**
+	 * Strict pins: provider → sessionId → pin, or null for a cached absence. `exclusive` marks a
+	 * binding's pin (a subagent bound to an account), which a model's eligible accounts never move.
+	 */
+	#strictPins: Map<string, Map<string, { credentialId: number; exclusive: boolean } | null>> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
 	#overrides: KeyOverrides;
@@ -245,36 +248,52 @@ export class SessionAffinity implements SessionsApi {
 	 * Strict pin on one stored row, OAuth or API key: only that row serves the
 	 * session. Ranking, reserve, idle warmth, rate-limit blocks and auth retry
 	 * never route around it, and a disabled or deleted row fails the request.
+	 * One exception: a model that only other accounts serve (`accountIds`) moves a
+	 * plain pin for that request. `exclusive` (a binding's pin) forbids even that.
 	 * Returns false for a missing row or a runtime override. A config apiKey does
 	 * not refuse the pin: the pin beats it for this session.
 	 */
-	pinStrict(provider: string, sessionId: string, credentialId: number): boolean {
+	pinStrict(provider: string, sessionId: string, credentialId: number, options?: { exclusive?: boolean }): boolean {
 		if (!sessionId || this.#overrides.hasRuntime(provider)) return false;
 		this.#pool.reloadProvider(provider);
 		const stored = this.#pool.entries(provider);
 		const index = stored.findIndex(entry => entry.id === credentialId);
 		const target = stored[index];
 		if (!target) return false;
-		this.#writeStrictPin(provider, sessionId, credentialId);
+		this.#writeStrictPin(provider, sessionId, credentialId, options?.exclusive === true);
 		this.record(provider, sessionId, target.credential.type, index, undefined, true);
 		return true;
 	}
 
 	/** The session's strict pin, or undefined. */
 	strictPin(provider: string, sessionId: string | undefined): number | undefined {
+		return this.#readStrictPin(provider, sessionId)?.credentialId;
+	}
+
+	/** Whether the session's strict pin is a binding's pin, which nothing moves. */
+	strictPinIsExclusive(provider: string, sessionId: string | undefined): boolean {
+		return this.#readStrictPin(provider, sessionId)?.exclusive === true;
+	}
+
+	#readStrictPin(
+		provider: string,
+		sessionId: string | undefined,
+	): { credentialId: number; exclusive: boolean } | undefined {
 		if (!sessionId) return undefined;
 		const cached = this.#strictPins.get(provider)?.get(sessionId);
 		if (cached !== undefined) return cached ?? undefined;
-		let id: number | null = null;
+		let pin: { credentialId: number; exclusive: boolean } | null = null;
 		try {
 			const raw = this.#store.getCache(`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`);
-			const parsed = raw ? (JSON.parse(raw) as { credentialId?: unknown }) : undefined;
-			if (typeof parsed?.credentialId === "number") id = parsed.credentialId;
+			const parsed = raw ? (JSON.parse(raw) as { credentialId?: unknown; exclusive?: unknown }) : undefined;
+			if (typeof parsed?.credentialId === "number") {
+				pin = { credentialId: parsed.credentialId, exclusive: parsed.exclusive === true };
+			}
 		} catch (err) {
 			logger.debug("Failed to read strict session pin from persistent store cache", { err });
 		}
-		this.#rememberStrictPin(provider, sessionId, id);
-		return id ?? undefined;
+		this.#rememberStrictPin(provider, sessionId, pin);
+		return pin ?? undefined;
 	}
 
 	/**
@@ -350,23 +369,27 @@ export class SessionAffinity implements SessionsApi {
 		return credentialId;
 	}
 
-	#writeStrictPin(provider: string, sessionId: string, credentialId: number): void {
+	#writeStrictPin(provider: string, sessionId: string, credentialId: number, exclusive = false): void {
 		const nowSec = Math.floor(Date.now() / 1000);
 		this.#store.setCache(
 			`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`,
-			JSON.stringify({ credentialId }),
+			JSON.stringify(exclusive ? { credentialId, exclusive } : { credentialId }),
 			nowSec + SESSION_PIN_TTL_SEC,
 		);
-		this.#rememberStrictPin(provider, sessionId, credentialId);
+		this.#rememberStrictPin(provider, sessionId, { credentialId, exclusive });
 	}
 
-	#rememberStrictPin(provider: string, sessionId: string, id: number | null): void {
+	#rememberStrictPin(
+		provider: string,
+		sessionId: string,
+		pin: { credentialId: number; exclusive: boolean } | null,
+	): void {
 		let bySession = this.#strictPins.get(provider);
 		if (!bySession) {
 			bySession = new Map();
 			this.#strictPins.set(provider, bySession);
 		}
-		bySession.set(sessionId, id);
+		bySession.set(sessionId, pin);
 	}
 
 	/**
@@ -394,8 +417,8 @@ export class SessionAffinity implements SessionsApi {
 			inherited += 1;
 		}
 		for (const provider of this.#pool.providers()) {
-			const pinned = this.strictPin(provider, sourceSessionId);
-			if (pinned !== undefined) this.#writeStrictPin(provider, targetSessionId, pinned);
+			const pinned = this.#readStrictPin(provider, sourceSessionId);
+			if (pinned) this.#writeStrictPin(provider, targetSessionId, pinned.credentialId, pinned.exclusive);
 		}
 		return inherited;
 	}

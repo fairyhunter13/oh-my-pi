@@ -100,6 +100,23 @@ describe("AuthStorage: one active credential per session", () => {
 		const pinWrites = setCacheSpy.mock.calls.filter(([key]) => key.startsWith("session:pin:"));
 		expect(pinWrites).toHaveLength(0);
 	});
+
+	test("a binding's exclusive pin stays exclusive across a reload and inherit; a plain pin stays plain", async () => {
+		const a = auth.addApiKey(PROVIDER, "sk-a");
+		const b = auth.addApiKey(PROVIDER, "sk-b");
+		expect(auth.pinSessionCredential(PROVIDER, "bound", a, { exclusive: true })).toBe(true);
+		expect(auth.pinSessionCredential(PROVIDER, "plain", b)).toBe(true);
+
+		const fresh = new AuthStorage(store!);
+		await fresh.credentials.reload();
+		expect(fresh.sessionPinIsExclusive(PROVIDER, "bound")).toBe(true);
+		expect(fresh.sessionPinIsExclusive(PROVIDER, "plain")).toBe(false);
+		fresh.sessions.inherit("bound", "bound-child");
+		fresh.sessions.inherit("plain", "plain-child");
+		expect(fresh.sessionPinIsExclusive(PROVIDER, "bound-child")).toBe(true);
+		expect(fresh.sessionPinIsExclusive(PROVIDER, "plain-child")).toBe(false);
+		await expect(fresh.keys.get(PROVIDER, "bound-child")).resolves.toBe("sk-a");
+	});
 });
 
 describe("AuthStorage.oauth.refreshCredentials", () => {

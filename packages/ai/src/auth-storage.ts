@@ -327,9 +327,18 @@ export class AuthStorage {
 		this.#catalog().setDefault(provider, id);
 	}
 
-	/** Strict session pin on an OAuth or API-key row; false when the row is missing. */
-	pinSessionCredential(provider: string, sessionId: string, id: number): boolean {
-		return this.#affinity.pinStrict(provider, sessionId, id);
+	/**
+	 * Strict session pin on an OAuth or API-key row; false when the row is missing. `exclusive`
+	 * is a binding's pin (a subagent bound to an account): a model that only other accounts serve
+	 * moves a plain pin for that request, never this one.
+	 */
+	pinSessionCredential(provider: string, sessionId: string, id: number, options?: { exclusive?: boolean }): boolean {
+		return this.#affinity.pinStrict(provider, sessionId, id, options);
+	}
+
+	/** Whether the session's pin is a binding's pin, which nothing moves. */
+	sessionPinIsExclusive(provider: string, sessionId: string): boolean {
+		return this.#affinity.strictPinIsExclusive(provider, sessionId);
 	}
 
 	/** Drop the session's strict pin; the session returns to the default and the pool. */

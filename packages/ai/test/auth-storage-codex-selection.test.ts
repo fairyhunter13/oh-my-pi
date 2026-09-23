@@ -2673,6 +2673,29 @@ describe("AuthStorage codex oauth ranking", () => {
 		).toBe("api-account-A");
 	});
 
+	test("a binding's exclusive pin keeps its Codex account even for a model only another account serves", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("account-A", "a@example.com") },
+			{ type: "oauth", ...createCredential("account-B", "b@example.com") },
+		]);
+		const firstAccount = authStorage.oauth.accounts("openai-codex")[0];
+		if (!firstAccount) throw new Error("expected first Codex account");
+
+		const sessionId = "daybreak-bound-child";
+		expect(
+			authStorage.pinSessionCredential("openai-codex", sessionId, firstAccount.credentialId, { exclusive: true }),
+		).toBe(true);
+		expect(
+			await authStorage.keys.get("openai-codex", sessionId, {
+				modelId: "gpt-daybreak-blue-latest",
+				accountIds: ["account-B"],
+			}),
+		).toBe("api-account-A");
+		expect(authStorage.sessionPinIsExclusive("openai-codex", sessionId)).toBe(true);
+	});
+
 	test.each([
 		["gpt-5.6-sol", "free", "plus"],
 		["gpt-5.6-luna", "go", "business"],
