@@ -35,6 +35,7 @@ import type {
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 } from "../usage";
+import { ensureCredentialCatalogColumns, migrateAuthSchemaV8ToV9, SqliteCredentialCatalog } from "./credential-catalog";
 
 // 5 min stale tolerance. Anthropic / OpenAI rate-limit /usage hard at the IP
 // level so we can't fetch all N credentials every cycle; with a long cache
@@ -88,7 +89,7 @@ type SerializedCredentialRecord = {
 	identityKey: string | null;
 };
 
-const AUTH_SCHEMA_VERSION = 8;
+const AUTH_SCHEMA_VERSION = 9;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
@@ -387,6 +388,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#authRevision: number;
 	#localAuthRevision: number;
 	#closed = false;
+	readonly credentialCatalog: SqliteCredentialCatalog;
 
 	constructor(db: Database) {
 		this.#db = db;
@@ -507,6 +509,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#listUsageHistoryStmt = this.#db.prepare(
 			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
 		);
+		this.credentialCatalog = new SqliteCredentialCatalog(this.#db);
 	}
 
 	/** Opens credential storage with bounded busy retries and one-shot corruption recovery. */
@@ -626,6 +629,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			this.#createAuthCredentialRefreshLeasesTable();
 			this.#createAuthCredentialBlockCompatibilityObjects();
 			this.#createAuthChangeTrackingObjects();
+			ensureCredentialCatalogColumns(this.#db);
 			this.#writeAuthSchemaVersion(AUTH_SCHEMA_VERSION);
 			return;
 		}
@@ -642,6 +646,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 
 		this.#createAuthCredentialIndexes();
+		ensureCredentialCatalogColumns(this.#db);
 		this.#createAuthCredentialBlocksTable();
 		this.#createAuthCredentialRefreshLeasesTable();
 		if (schemaVersion <= AUTH_SCHEMA_VERSION) {
@@ -972,6 +977,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 		if (fromVersion < 8) {
 			this.#migrateAuthSchemaV7ToV8();
+		}
+		if (fromVersion < 9) {
+			migrateAuthSchemaV8ToV9(this.#db, version => this.#writeAuthSchemaVersion(version));
 		}
 	}
 
@@ -2038,6 +2046,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#getCredentialRefreshLeaseStmt.finalize();
 		this.#renewCredentialRefreshLeaseStmt.finalize();
 		this.#releaseCredentialRefreshLeaseStmt.finalize();
+		this.credentialCatalog.close();
 		this.#db.close();
 	}
 }
