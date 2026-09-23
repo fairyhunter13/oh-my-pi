@@ -55,6 +55,7 @@ export default class AuthBroker extends Command {
 		}),
 		all: Flags.boolean({ description: "Select every stored credential for the provider (logout)" }),
 		yes: Flags.boolean({ description: "Skip the removal confirmation prompt (logout)", char: "y" }),
+		force: Flags.boolean({ description: "Force a refresh regardless of expiry skew (refresh)" }),
 	};
 
 	static examples = [
@@ -74,6 +75,8 @@ export default class AuthBroker extends Command {
 		"# Preview a migration from local store + env vars to the configured broker\n  omp auth-broker migrate --from-local --include-env --dry-run",
 		"# Apply the migration\n  omp auth-broker migrate --from-local --include-env",
 		"# Health-check the configured remote broker\n  omp auth-broker status",
+		"# Refresh every stored OAuth subscription about to expire\n  omp auth-broker refresh",
+		"# Force-refresh one provider now (e.g. from a systemd timer)\n  omp auth-broker refresh anthropic --force",
 	];
 
 	async run(): Promise<void> {
@@ -102,6 +105,7 @@ export default class AuthBroker extends Command {
 				account: flags.account,
 				all: flags.all,
 				yes: flags.yes,
+				force: flags.force,
 			},
 		};
 		await initTheme();

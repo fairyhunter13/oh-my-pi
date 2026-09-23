@@ -30,7 +30,7 @@ export class SessionAccountSelectorComponent extends OverlayPanel {
 		if (rows.some(row => row.pinned)) {
 			const value = "pool";
 			selectionByValue.set(value, { kind: "pool" });
-			items.push({ value, label: "Use the pool", description: "Clears this session's pin" });
+			items.push({ value, label: "Pick again at the next request", description: "Clears this session's choice" });
 		}
 
 		this.#selectList = new SelectList(

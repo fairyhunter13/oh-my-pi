@@ -630,6 +630,7 @@ async function runInteractiveMode(
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
 				recentSessions: startupLease?.recentSessions,
+				startCredentialRefreshSweep: true,
 			}),
 		);
 		void startBackgroundModelDiscovery?.();

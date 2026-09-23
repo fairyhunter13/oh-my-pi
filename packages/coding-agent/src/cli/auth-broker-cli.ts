@@ -32,6 +32,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
+import { isDefinitiveOAuthFailure } from "@oh-my-pi/pi-ai/error";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -42,7 +43,16 @@ import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { pickOAuthProvider, promptLine, runTerminalOAuthLogin } from "./oauth-terminal";
 
-export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
+export type AuthBrokerAction =
+	| "serve"
+	| "token"
+	| "login"
+	| "logout"
+	| "refresh"
+	| "status"
+	| "import"
+	| "migrate"
+	| "list";
 
 export interface AuthBrokerCommandArgs {
 	action: AuthBrokerAction;
@@ -69,6 +79,8 @@ export interface AuthBrokerCommandArgs {
 		all?: boolean;
 		/** `logout`: skip the removal confirmation prompt. */
 		yes?: boolean;
+		/** `refresh`: force a refresh regardless of expiry skew. */
+		force?: boolean;
 	};
 }
 
@@ -77,6 +89,7 @@ const ACTIONS: readonly AuthBrokerAction[] = [
 	"token",
 	"login",
 	"logout",
+	"refresh",
 	"import",
 	"migrate",
 	"status",
@@ -293,6 +306,59 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 /** Short display name for a stored row, matching `/providers` → Credentials. */
 function credentialDisplayName(row: CredentialSummary): string {
 	return row.label ?? row.identity ?? row.hint ?? `#${row.id}`;
+}
+
+/**
+ * `omp auth-broker refresh [provider] [--force]` — force-refreshes every
+ * active OAuth row (or one provider's), the way `AuthBrokerRefresher` does on
+ * its own timer. A definitive OAuth failure (refresh token revoked/expired)
+ * exits 2 so a systemd timer alerts only on that; any other failure exits 1.
+ */
+async function runRefresh(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	const authStorage = await AuthStorage.create(getAgentDbPath());
+	try {
+		const provider = flags.provider;
+		const nameById = new Map(authStorage.listCredentials(provider).map(row => [row.id, credentialDisplayName(row)]));
+		const result = await authStorage.oauth.refreshCredentials({
+			provider,
+			force: flags.force ?? false,
+			skewMs: 60 * 60_000,
+		});
+		if (flags.json) {
+			process.stdout.write(`${JSON.stringify(result)}\n`);
+		} else {
+			for (const id of result.refreshed) {
+				process.stdout.write(`${nameById.get(id) ?? `#${id}`} (#${id}) refreshed.\n`);
+			}
+			for (const id of result.skipped) {
+				process.stdout.write(`${nameById.get(id) ?? `#${id}`} (#${id}) skipped: provider has no refresh.\n`);
+			}
+			for (const { id, error } of result.failed) {
+				const name = nameById.get(id) ?? `#${id}`;
+				process.stdout.write(
+					isDefinitiveOAuthFailure(error)
+						? `${name} (#${id}) needs a new login: ${error}\n`
+						: `${name} (#${id}) failed: ${error}\n`,
+				);
+			}
+			if (result.refreshed.length === 0 && result.failed.length === 0 && result.skipped.length === 0) {
+				const stored = authStorage.listCredentials(provider).filter(row => row.kind === "oauth" && !row.disabled).length;
+				const scope = provider ? ` for ${provider}` : "";
+				process.stdout.write(
+					stored === 0
+						? `No OAuth credentials stored${scope}.\n`
+						: `${stored} subscription${stored === 1 ? "" : "s"}${scope} checked; none expires within the hour.\n`,
+				);
+			}
+		}
+		if (result.failed.some(entry => isDefinitiveOAuthFailure(entry.error))) {
+			process.exitCode = 2;
+		} else if (result.failed.length > 0) {
+			process.exitCode = 1;
+		}
+	} finally {
+		authStorage.close();
+	}
 }
 
 /** One line for a stored row: `name  kind · default · disabled · identity/hint · org · #id`. */
@@ -981,6 +1047,9 @@ export async function runAuthBrokerCommand(cmd: AuthBrokerCommandArgs): Promise<
 			return;
 		case "logout":
 			await runLogout(cmd.flags);
+			return;
+		case "refresh":
+			await runRefresh(cmd.flags);
 			return;
 		case "import":
 			await runImport(cmd.flags);

@@ -1,4 +1,5 @@
 import type { AuthStorage, CredentialSummary } from "@oh-my-pi/pi-ai";
+import { suggestCredentialLabel } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthPrompt, OAuthProvider, OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import { formTheme } from "../../chrome/form-theme";
@@ -20,6 +21,7 @@ type View =
 	| { kind: "credentials"; provider: string }
 	| { kind: "actions"; provider: string; id: number }
 	| { kind: "scope"; provider: string; id: number }
+	| { kind: "newScope"; provider: string; id: number }
 	| { kind: "remove"; provider: string; id: number }
 	| { kind: "field"; provider: string; field: TextFormField }
 	| { kind: "login"; provider: string; oauth: OAuthProviderInfo };
@@ -122,6 +124,7 @@ export class CredentialsTab implements SetupTab {
 			case "remove":
 				return `${view.provider}: ${this.#describe(view.provider, view.id)}`;
 			case "scope":
+			case "newScope":
 				return `Use ${this.#describe(view.provider, view.id)} for:`;
 			case "field":
 				return `${view.provider}: Enter saves, Esc cancels.`;
@@ -189,7 +192,7 @@ export class CredentialsTab implements SetupTab {
 				for (const model of this.#host.ctx.getModels().all) known.add(model.provider);
 				for (const info of getOAuthProviders()) known.add(info.storeCredentialsAs ?? info.id);
 				const disabledProviders = new Set(this.#host.ctx.disabledProviders);
-				return [...known]
+				const items = [...known]
 					.filter(provider => counts.has(provider) || !disabledProviders.has(provider))
 					.sort((a, b) => Number(counts.has(b)) - Number(counts.has(a)) || a.localeCompare(b))
 					.map(provider => {
@@ -208,6 +211,14 @@ export class CredentialsTab implements SetupTab {
 							description: parts.length > 0 ? parts.join(" · ") : "no stored credentials",
 						};
 					});
+				if (rows.some(row => row.kind === "oauth")) {
+					items.push({
+						value: "refresh:all",
+						label: "Refresh every subscription",
+						description: "Force refresh, every provider",
+					});
+				}
+				return items;
 			}
 			case "credentials": {
 				const rows = this.#rows(view.provider);
@@ -219,12 +230,19 @@ export class CredentialsTab implements SetupTab {
 				if (rows.some(row => row.pinned)) {
 					items.push({
 						value: "pin:clear",
-						label: "Use the pool in this session",
-						description: "Clears this session's pin",
+						label: "Pick again at the next request",
+						description: "Clears this session's choice",
 					});
 				}
 				if (rows.some(row => row.isDefault)) {
 					items.push({ value: "default:clear", label: "Clear the default for new sessions" });
+				}
+				if (rows.some(row => row.kind === "oauth")) {
+					items.push({
+						value: "refresh:provider",
+						label: "Refresh subscriptions",
+						description: "Force refresh this provider's OAuth rows",
+					});
 				}
 				return items;
 			}
@@ -247,6 +265,17 @@ export class CredentialsTab implements SetupTab {
 					},
 					{ value: "default", label: "Default for new sessions" },
 				];
+			case "newScope":
+				return [
+					{
+						value: "session",
+						label: "This session",
+						description: this.#host.ctx.sessionId ? undefined : "No running session",
+						disabled: !this.#host.ctx.sessionId,
+					},
+					{ value: "default", label: "Default for new sessions" },
+					{ value: "store", label: "Just store it" },
+				];
 			case "remove":
 				return [
 					{ value: "no", label: "Keep it" },
@@ -261,13 +290,19 @@ export class CredentialsTab implements SetupTab {
 		const view = this.#view;
 		try {
 			if (view.kind === "providers") {
-				this.#show({ kind: "credentials", provider: value.slice("provider:".length) }, []);
+				if (value === "refresh:all") {
+					void this.#refreshCredentials(undefined);
+				} else {
+					this.#show({ kind: "credentials", provider: value.slice("provider:".length) }, []);
+				}
 			} else if (view.kind === "credentials") {
 				this.#chooseInCredentials(view.provider, value);
 			} else if (view.kind === "actions") {
 				this.#chooseAction(view.provider, view.id, value);
 			} else if (view.kind === "scope") {
 				this.#chooseScope(view.provider, view.id, value);
+			} else if (view.kind === "newScope") {
+				this.#chooseNewScope(view.provider, view.id, value);
 			} else if (view.kind === "remove") {
 				if (value === "yes") void this.#remove(view.provider, view.id);
 				else this.#show({ kind: "actions", provider: view.provider, id: view.id });
@@ -291,6 +326,27 @@ export class CredentialsTab implements SetupTab {
 		} else if (value === "default:clear") {
 			this.#authStorage.setDefaultCredential(provider, null);
 			this.#show({ kind: "credentials", provider }, [theme.fg("success", "No default for new sessions.")]);
+		} else if (value === "refresh:provider") {
+			void this.#refreshCredentials(provider);
+		}
+	}
+
+	/** Force-refresh every OAuth row (`provider` scopes it), then report the result on the current view. */
+	async #refreshCredentials(provider: string | undefined): Promise<void> {
+		const view = this.#view;
+		const nameById = new Map(this.#rows(provider).map(row => [row.id, credentialName(row)]));
+		this.#show(view, [theme.fg("dim", "Refreshing…")]);
+		try {
+			const result = await this.#authStorage.oauth.refreshCredentials({ provider, force: true });
+			if (this.#disposed) return;
+			const detail = result.failed
+				.map(entry => `${nameById.get(entry.id) ?? `#${entry.id}`}: ${entry.error}`)
+				.join(", ");
+			const summary = `Refreshed ${result.refreshed.length}, failed ${result.failed.length}${detail ? `: ${detail}` : ""}`;
+			this.#show(view, [theme.fg(result.failed.length > 0 ? "warning" : "success", summary)]);
+		} catch (error) {
+			if (this.#disposed) return;
+			this.#show(view, [theme.fg("error", error instanceof Error ? error.message : String(error))]);
 		}
 	}
 
@@ -330,6 +386,58 @@ export class CredentialsTab implements SetupTab {
 			this.#authStorage.setDefaultCredential(provider, id);
 			this.#show({ kind: "credentials", provider }, [theme.fg("success", `New sessions start with ${name}.`)]);
 		}
+	}
+
+	#chooseNewScope(provider: string, id: number, value: string): void {
+		const name = this.#describe(provider, id);
+		const sessionId = this.#host.ctx.sessionId;
+		if (value === "session" && sessionId) {
+			if (!this.#authStorage.pinSessionCredential(provider, sessionId, id)) {
+				throw new Error(`${name} is missing or disabled.`);
+			}
+			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added ${name}. This session uses it only.`)]);
+		} else if (value === "default") {
+			this.#authStorage.setDefaultCredential(provider, id);
+			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added ${name}. New sessions start with it.`)]);
+		} else if (value === "store") {
+			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added ${name}.`)]);
+		}
+	}
+
+	/**
+	 * "Name this credential" then "Use it for:" for a row a login or add-API-key
+	 * flow just stored. Esc while naming leaves the label unset and still moves
+	 * on to the scope step; Esc while picking a scope leaves the row unpinned
+	 * and not the default — either way the row itself stays.
+	 */
+	#nameAndScopeNewCredential(provider: string, id: number): void {
+		const rows = this.#rows(provider);
+		const row = rows.find(candidate => candidate.id === id);
+		if (!row) return;
+		const suggested = suggestCredentialLabel(rows, row);
+		this.#askText(provider, {
+			label: "Name this credential",
+			initialValue: suggested,
+			onSubmit: text => this.#submitNewCredentialName(provider, id, suggested, text),
+			onCancel: () => this.#show({ kind: "newScope", provider, id }, []),
+		});
+	}
+
+	#submitNewCredentialName(provider: string, id: number, suggested: string, text: string): void {
+		const label = text.trim() || suggested;
+		try {
+			this.#authStorage.renameCredential(id, label);
+		} catch (error) {
+			this.#askText(provider, {
+				label: "Name this credential",
+				initialValue: suggested,
+				onSubmit: retryText => this.#submitNewCredentialName(provider, id, suggested, retryText),
+				onCancel: () => this.#show({ kind: "newScope", provider, id }, []),
+			});
+			this.#status = [theme.fg("error", error instanceof Error ? error.message : String(error))];
+			return;
+		}
+		this.#show({ kind: "newScope", provider, id }, []);
 	}
 
 	async #remove(provider: string, id: number): Promise<void> {
@@ -385,14 +493,9 @@ export class CredentialsTab implements SetupTab {
 			label: `API key for ${provider}`,
 			secret: true,
 			onSubmit: key => {
-				this.#askText(provider, {
-					label: "Name (optional, unique within the provider)",
-					onSubmit: name => {
-						const id = this.#authStorage.addApiKey(provider, key, name.trim() || null);
-						void this.#host.ctx.refreshProvider(provider);
-						this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added API key #${id}.`)]);
-					},
-				});
+				const id = this.#authStorage.addApiKey(provider, key, null);
+				void this.#host.ctx.refreshProvider(provider);
+				this.#nameAndScopeNewCredential(provider, id);
 			},
 		});
 	}
@@ -422,7 +525,7 @@ export class CredentialsTab implements SetupTab {
 			return pending.promise;
 		};
 		try {
-			await this.#authStorage.oauth.login(oauth.id as OAuthProvider, {
+			const identity = await this.#authStorage.oauth.login(oauth.id as OAuthProvider, {
 				signal: abort.signal,
 				onBrowserSession: (request, signal) => this.#host.ctx.captureBrowserSession(request, signal),
 				onAuth: info => {
@@ -441,7 +544,11 @@ export class CredentialsTab implements SetupTab {
 			});
 			await this.#host.ctx.refreshProvider(provider);
 			if (this.#disposed) return;
-			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added a ${oauth.name} subscription.`)]);
+			if (identity?.credentialId !== undefined) {
+				this.#nameAndScopeNewCredential(provider, identity.credentialId);
+			} else {
+				this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added a ${oauth.name} subscription.`)]);
+			}
 		} catch (error) {
 			if (this.#disposed) return;
 			const message = abort.signal.aborted

@@ -3630,6 +3630,11 @@ export class AgentSession implements SettingsScope {
 					},
 					costUsd: assistantMsg.usage.cost.total,
 				});
+				// ccw: a turn that a stored row served becomes the session's one choice, so a later
+				// 429 or 401 never moves the session to another account. A failed turn adopts nothing.
+				if (assistantMsg.stopReason !== "error") {
+					this.#modelRegistry.authStorage.sessions.adopt(assistantMsg.provider, this.sessionId);
+				}
 				// Persist which account served this turn so a resumed process can
 				// re-pin it and keep the provider's account-scoped prompt cache
 				// warm (broker-mode sticky routing is process-local).

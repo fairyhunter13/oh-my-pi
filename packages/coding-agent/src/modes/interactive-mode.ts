@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import { startCredentialRefreshSweep } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -1153,6 +1154,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;
 	#recorderStarting = false;
+	/** `stop()` for the interactive-only OAuth refresh sweep started in `init()`. */
+	#credentialRefreshSweepStop: (() => void) | undefined;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
@@ -2088,6 +2091,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+
+		// Interactive-only: print/-p, RPC/ACP and subagents never call `init()`
+		// with this flag set, so they never start the timer. `stop()` cancels it.
+		if (options.startCredentialRefreshSweep) {
+			this.#credentialRefreshSweepStop = startCredentialRefreshSweep(this.session.modelRegistry.authStorage, {
+				intervalMs: 15 * 60_000,
+				skewMs: 60 * 60_000,
+			});
+		}
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -6043,6 +6055,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#credentialRefreshSweepStop?.();
+		this.#credentialRefreshSweepStop = undefined;
 		this.#appearanceRefreshRequest = undefined;
 		this.#streamPublisher?.dispose();
 		this.#streamPublisher = undefined;

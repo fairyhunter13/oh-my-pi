@@ -1,5 +1,5 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+import { PASTE_CODE_LOGIN_PROVIDERS, suggestCredentialLabel } from "@oh-my-pi/pi-ai";
 import type { OAuthPrompt, OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import { type Component, type Focusable, Container } from "../../tui";
 import { Spacer } from "../../components/spacer";
@@ -11,6 +11,8 @@ import { type SgrMouseEvent } from "../../mouse";
 import { wrapTextWithAnsi } from "../../utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { OAuthSelectorComponent } from "../../overlays/oauth-selector";
+import { HookInputComponent } from "../../overlays/hook-input";
+import { HookSelectorComponent } from "../../overlays/hook-selector";
 import { theme } from "../../theme/theme";
 import type { SetupSceneHost, SetupTab } from "./types";
 
@@ -86,6 +88,10 @@ export class SignInTab implements SetupTab {
 	#promptAbortCleanup: (() => void) | undefined;
 	#loginAbort: AbortController | undefined;
 	#loggingInProvider: string | undefined;
+	/** "Name this credential" / "Use it for:" step shown after a successful login, before the picker reopens. */
+	#postLoginStep: Component | undefined;
+	/** Resolves the pending `#postLoginStep` promise with `undefined`; cleared once settled. */
+	#postLoginAbort: (() => void) | undefined;
 	#disposed = false;
 	#step: WizardStep | undefined;
 
@@ -107,6 +113,7 @@ export class SignInTab implements SetupTab {
 		this.#selector.stopValidation();
 		this.#loginAbort?.abort();
 		this.#resolvePrompt("");
+		this.#postLoginAbort?.();
 	}
 
 	invalidate(): void {
@@ -116,6 +123,10 @@ export class SignInTab implements SetupTab {
 	}
 
 	handleInput(data: string): void {
+		if (this.#postLoginStep) {
+			this.#postLoginStep.handleInput?.(data);
+			return;
+		}
 		if (this.#loggingInProvider) {
 			if (this.#authUrl && (matchesKey(data, "alt+c") || (data === "c" && !this.#prompt))) {
 				void this.#copyAuthUrl();
@@ -193,7 +204,7 @@ export class SignInTab implements SetupTab {
 			this.#step.setKind("async");
 			this.#step.setHeading(new Text(theme.bold(`Signing in to ${this.#loggingInProvider}`), 0, 0));
 			this.#step.setIntro(undefined);
-			this.#step.setContent(tail);
+			this.#step.setContent(this.#postLoginStep ?? tail);
 			this.#step.setStatus(undefined);
 		} else {
 			this.#step.setKind("choice");
@@ -229,7 +240,7 @@ export class SignInTab implements SetupTab {
 		this.#host.restoreFocus();
 		this.#host.requestRender();
 		try {
-			await this.#authStorage.oauth.login(providerId as OAuthProvider, {
+			const identity = await this.#authStorage.oauth.login(providerId as OAuthProvider, {
 				signal: this.#loginAbort.signal,
 				onBrowserSession: (request, signal) => this.#host.ctx.captureBrowserSession(request, signal),
 				onAuth: info => {
@@ -267,6 +278,10 @@ export class SignInTab implements SetupTab {
 			// discovery instead of reusing a fresh authoritative cache row (#5780).
 			await this.#host.ctx.refreshProvider(providerId);
 			if (this.#disposed) return;
+			if (identity?.credentialId !== undefined) {
+				await this.#nameAndScopeAfterLogin(providerId, identity.credentialId);
+				if (this.#disposed) return;
+			}
 			this.#statusLines = [
 				theme.fg("success", `${theme.status.success} Signed in to ${providerId}`),
 				theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`),
@@ -299,6 +314,97 @@ export class SignInTab implements SetupTab {
 			this.#host.restoreFocus();
 			this.#host.requestRender();
 		}
+	}
+
+	/**
+	 * "Name this credential" then "Use it for:" — run once right after a login
+	 * stores a new row. Esc while naming leaves the label unset and still moves
+	 * on to the scope step; Esc while picking a scope leaves the row unpinned
+	 * and not the default. Either way the row stays.
+	 */
+	async #nameAndScopeAfterLogin(providerId: string, credentialId: number): Promise<void> {
+		const sessionId = this.#host.ctx.sessionId;
+		let suggested: string;
+		try {
+			const rows = this.#authStorage.listCredentials(providerId, sessionId);
+			const row = rows.find(candidate => candidate.id === credentialId);
+			if (!row) return;
+			suggested = suggestCredentialLabel(rows, row);
+		} catch {
+			return;
+		}
+		for (;;) {
+			const value = await this.#promptTabText("Name this credential", suggested);
+			if (this.#disposed) return;
+			if (value === undefined) break;
+			const label = value.trim() || suggested;
+			try {
+				this.#authStorage.renameCredential(credentialId, label);
+				break;
+			} catch (error) {
+				this.#statusLines = [theme.fg("error", error instanceof Error ? error.message : String(error))];
+				this.#host.requestRender();
+			}
+		}
+		const choice = await this.#promptTabChoice(
+			"Use it for:",
+			[{ label: "This session" }, { label: "Default for new sessions" }, { label: "Just store it" }],
+			sessionId ? [] : [0],
+		);
+		if (this.#disposed || choice === undefined) return;
+		if (choice === 0 && sessionId) {
+			if (!this.#authStorage.pinSessionCredential(providerId, sessionId, credentialId)) {
+				this.#statusLines = [theme.fg("warning", "Credential is missing or disabled.")];
+			}
+		} else if (choice === 1) {
+			this.#authStorage.setDefaultCredential(providerId, credentialId);
+		}
+	}
+
+	/** Mount a prefilled text prompt as the tab's content; resolves the submitted value, or `undefined` on Esc. */
+	#promptTabText(title: string, initialValue: string): Promise<string | undefined> {
+		const { promise, resolve } = Promise.withResolvers<string | undefined>();
+		let settled = false;
+		const settle = (value: string | undefined) => {
+			if (settled) return;
+			settled = true;
+			this.#postLoginStep = undefined;
+			this.#postLoginAbort = undefined;
+			resolve(value);
+		};
+		const input = new HookInputComponent(title, undefined, value => settle(value), () => settle(undefined), {
+			initialValue,
+		});
+		this.#postLoginStep = input;
+		this.#postLoginAbort = () => settle(undefined);
+		this.#host.setFocus(input);
+		this.#host.requestRender();
+		return promise;
+	}
+
+	/** Mount a small choice prompt as the tab's content; resolves the chosen option's index, or `undefined` on Esc. */
+	#promptTabChoice(
+		title: string,
+		options: ReadonlyArray<{ label: string }>,
+		disabledIndices: readonly number[],
+	): Promise<number | undefined> {
+		const { promise, resolve } = Promise.withResolvers<number | undefined>();
+		let settled = false;
+		const settle = (value: string | undefined) => {
+			if (settled) return;
+			settled = true;
+			this.#postLoginStep = undefined;
+			this.#postLoginAbort = undefined;
+			resolve(value === undefined ? undefined : options.findIndex(option => option.label === value));
+		};
+		const selector = new HookSelectorComponent(title, [...options], value => settle(value), () => settle(undefined), {
+			disabledIndices,
+		});
+		this.#postLoginStep = selector;
+		this.#postLoginAbort = () => settle(undefined);
+		this.#host.setFocus(selector);
+		this.#host.requestRender();
+		return promise;
 	}
 
 	async #copyAuthUrl(): Promise<void> {

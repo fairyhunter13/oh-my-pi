@@ -24,6 +24,14 @@ import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { showGitOverlay } from "../../cli/git-tui";
 import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import { HookSelectorComponent } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import {
+	applyCredentialAfterLoginName,
+	applyCredentialAfterLoginScope,
+	CREDENTIAL_AFTER_LOGIN_SCOPES,
+	suggestedCredentialName,
+} from "../../slash-commands/helpers/credential-after-login";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
@@ -1826,6 +1834,9 @@ export class SelectorController {
 			// are left untouched. `refreshProvider` swallows discovery failures, so
 			// awaiting cannot reject the login.
 			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
+			if (identity?.credentialId !== undefined) {
+				await this.#nameAndScopeCredentialAfterLogin(providerId, identity.credentialId);
+			}
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -1855,6 +1866,87 @@ export class SelectorController {
 		} finally {
 			restoreEditor();
 		}
+	}
+
+	/**
+	 * "Name this credential" then "Use it for:" — run once right after a
+	 * login stores a new row. Esc at either step keeps what is already
+	 * stored: Esc while naming leaves the label unset, Esc while picking a
+	 * scope leaves the row unpinned/not-default (just stored).
+	 */
+	async #nameAndScopeCredentialAfterLogin(provider: string, credentialId: number): Promise<void> {
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const sessionId = this.ctx.session.sessionId;
+		let suggested: string;
+		try {
+			suggested = suggestedCredentialName(authStorage, provider, sessionId, credentialId);
+		} catch {
+			return;
+		}
+		for (;;) {
+			const value = await this.#promptEditorText("Name this credential", suggested);
+			if (value === undefined) break;
+			const result = applyCredentialAfterLoginName(authStorage, credentialId, suggested, value);
+			if (result.ok) break;
+			this.ctx.showError(result.error);
+		}
+		const choice = await this.#promptEditorChoice(
+			"Use it for:",
+			CREDENTIAL_AFTER_LOGIN_SCOPES.map(entry => ({ label: entry.label, description: entry.description })),
+			sessionId ? [] : [0],
+		);
+		if (choice === undefined) return;
+		const result = applyCredentialAfterLoginScope(
+			authStorage,
+			provider,
+			sessionId,
+			credentialId,
+			CREDENTIAL_AFTER_LOGIN_SCOPES[choice].value,
+		);
+		if (!result.ok) this.ctx.showWarning(result.error);
+	}
+
+	/** Mount a prefilled text prompt in the editor slot; resolves the submitted value, or `undefined` on Esc. */
+	#promptEditorText(title: string, initialValue: string): Promise<string | undefined> {
+		const { promise, resolve } = Promise.withResolvers<string | undefined>();
+		let settled = false;
+		const settle = (value: string | undefined) => {
+			if (settled) return;
+			settled = true;
+			resolve(value);
+		};
+		const input = new HookInputComponent(title, undefined, value => settle(value), () => settle(undefined), {
+			initialValue,
+		});
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(input);
+		this.ctx.ui.setFocus(input);
+		this.ctx.ui.requestRender();
+		return promise;
+	}
+
+	/** Mount a small choice prompt in the editor slot; resolves the chosen option's index, or `undefined` on Esc. */
+	#promptEditorChoice(
+		title: string,
+		options: ReadonlyArray<{ label: string; description?: string }>,
+		disabledIndices: readonly number[],
+	): Promise<number | undefined> {
+		const { promise, resolve } = Promise.withResolvers<number | undefined>();
+		let settled = false;
+		const settle = (value: string | undefined) => {
+			if (settled) return;
+			settled = true;
+			resolve(value === undefined ? undefined : options.findIndex(option => option.label === value));
+		};
+		const selector = new HookSelectorComponent(title, [...options], value => settle(value), () => settle(undefined), {
+			disabledIndices,
+			tui: this.ctx.ui,
+		});
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(selector);
+		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+		return promise;
 	}
 
 	/** Provider list + row grouping for the `/logout` picker. */

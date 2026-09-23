@@ -148,7 +148,10 @@ async function handleSessionPinCommand(
 		rows.forEach((row, index) => {
 			lines.push(`${index + 1}. ${credentialName(row)}${row.active ? " (active)" : ""}`);
 		});
-		lines.push("", "Pin one with `/session pin <number|label|email|#id>`, or `/session pin pool` to clear.");
+		lines.push(
+			"",
+			"Pin one with `/session pin <number|label|email|#id>`, or `/session pin pool` to pick again at the next request.",
+		);
 		await output(lines.join("\n"));
 		return;
 	}

@@ -12,6 +12,8 @@ export interface HookInputOptions {
 	tui?: TUI;
 	timeout?: number;
 	onTimeout?: () => void;
+	/** Prefill the field so Enter submits it unedited. */
+	initialValue?: string;
 }
 
 export class HookInputComponent extends OverlayPanel {
@@ -51,6 +53,7 @@ export class HookInputComponent extends OverlayPanel {
 			theme: formTheme,
 			hint: "enter submit  esc cancel",
 			empty: "submit",
+			initialValue: opts?.initialValue,
 			onSubmit: value => this.#onSubmitCallback(value),
 			onCancel: () => this.#onCancelCallback(),
 		});
