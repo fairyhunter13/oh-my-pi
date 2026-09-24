@@ -7,7 +7,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { AgentsHubComponent, type HubAgent } from "../src/overlays/agents-hub";
+import { AgentsHubComponent, type AgentsHubDeps, type HubAgent } from "../src/overlays/agents-hub";
 import { initTheme } from "../src/theme";
 import type { TUI } from "../src/index";
 
@@ -44,7 +44,10 @@ const sonnet = buildModel({
 	maxTokens: 8192,
 });
 
-async function createHub(settings: TestSettings): Promise<{
+async function createHub(
+	settings: TestSettings,
+	overrides: Partial<AgentsHubDeps> = {},
+): Promise<{
 	hub: AgentsHubComponent;
 	strip: () => string;
 	type: (text: string) => void;
@@ -67,12 +70,23 @@ async function createHub(settings: TestSettings): Promise<{
 			},
 			loadAgents: async () => {
 				const agents: HubAgent[] = [
-					{ name: "dev", description: "Development agent", systemPrompt: "", source: "project", disabled: false },
+					{
+						name: "dev",
+						description: "Development agent",
+						systemPrompt: "You are dev.",
+						source: "project",
+						filePath: "/tmp/agents-hub-test/.omp/agents/dev.md",
+						origin: "project-omp",
+						editable: true,
+						disabled: false,
+					},
 					{
 						name: "scout",
 						description: "Read-only research",
 						systemPrompt: "",
 						source: "bundled",
+						origin: "bundled",
+						editable: false,
 						disabled: false,
 					},
 					{
@@ -80,6 +94,8 @@ async function createHub(settings: TestSettings): Promise<{
 						description: "Generic task agent",
 						systemPrompt: "",
 						source: "bundled",
+						origin: "bundled",
+						editable: false,
 						disabled: false,
 					},
 				];
@@ -117,8 +133,17 @@ async function createHub(settings: TestSettings): Promise<{
 				throw new Error("Agent generation is not used by configuration tests");
 			},
 			saveAgent: async () => {
-				throw new Error("Agent creation is not used by configuration tests");
+				throw new Error("saveAgent is not used by this test; pass an override");
 			},
+			updateAgent: async () => {
+				throw new Error("updateAgent is not used by this test; pass an override");
+			},
+			deleteAgent: async () => {
+				throw new Error("deleteAgent is not used by this test; pass an override");
+			},
+			hasAgentProfileCommand: () => false,
+			runAgentProfileSet: async () => {},
+			...overrides,
 		},
 		{ onCancel: () => (cancelled = true) },
 	);
@@ -257,5 +282,109 @@ describe("AgentsHub configuration strips", () => {
 		hub.handleInput("\x1b"); // close strip
 		expect(strip()).not.toContain("dev →");
 		expect(cancelled()).toBe(false);
+	});
+});
+
+describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
+	test("row source label distinguishes project .omp from bundled", async () => {
+		const { strip } = await createHub(createSettings());
+		const rendered = strip();
+		expect(rendered).toContain("project .omp");
+		expect(rendered).toContain("bundled");
+	});
+
+	test("e opens the edit form for an editable agent; Enter save calls updateAgent", async () => {
+		const settings = createSettings();
+		const calls: Array<{ filePath: string; description: string }> = [];
+		const { hub, strip } = await createHub(settings, {
+			updateAgent: async (filePath, spec) => {
+				calls.push({ filePath, description: spec.whenToUse });
+			},
+		});
+		hub.handleInput("e");
+		expect(strip()).toContain("Edit agent");
+		expect(strip()).toContain("Name: dev");
+		hub.handleInput("\r"); // save with the unedited fields
+		expect(calls).toEqual([
+			{ filePath: "/tmp/agents-hub-test/.omp/agents/dev.md", description: "Development agent" },
+		]);
+	});
+
+	test("e on a read-only (bundled) agent opens the copy form instead; Enter save calls saveAgent", async () => {
+		const settings = createSettings();
+		const calls: string[] = [];
+		const { hub, strip } = await createHub(settings, {
+			saveAgent: async (scope, spec) => {
+				calls.push(`${scope}/${spec.identifier}`);
+				return `/tmp/${scope}/${spec.identifier}.md`;
+			},
+		});
+		hub.handleInput("\x1b[B"); // dev → scout
+		hub.handleInput("e");
+		expect(strip()).toContain("Copy agent");
+		hub.handleInput("\r"); // save the copy
+		expect(calls).toEqual(["user/scout"]);
+	});
+
+	test("d opens a delete confirmation for an editable agent; confirming calls deleteAgent", async () => {
+		const settings = createSettings();
+		const calls: string[] = [];
+		const { hub, strip } = await createHub(settings, {
+			deleteAgent: async filePath => {
+				calls.push(filePath);
+			},
+		});
+		hub.handleInput("d");
+		expect(strip()).toContain("Keep it");
+		expect(strip()).toContain("Delete dev");
+		hub.handleInput("\x1b[C"); // Keep it → Delete dev
+		hub.handleInput("\r");
+		expect(calls).toEqual(["/tmp/agents-hub-test/.omp/agents/dev.md"]);
+	});
+
+	test("d on a read-only (bundled) agent shows a notice instead of deleting", async () => {
+		const settings = createSettings();
+		const { hub, strip } = await createHub(settings);
+		hub.handleInput("\x1b[B"); // dev → scout
+		hub.handleInput("d");
+		expect(strip()).toContain("read-only");
+	});
+
+	test("c hands the mapping off to /agent-profile set <name> when the command is registered", async () => {
+		const settings = createSettings();
+		const calls: string[] = [];
+		const { hub, strip } = await createHub(settings, {
+			hasAgentProfileCommand: () => true,
+			runAgentProfileSet: async name => {
+				calls.push(name);
+			},
+		});
+		hub.handleInput("c");
+		expect(calls).toEqual(["dev"]);
+		expect(strip()).toContain("/agent-profile set dev");
+	});
+
+	test("c names the command to run by hand when /agent-profile is not registered", async () => {
+		const settings = createSettings();
+		const { hub, strip } = await createHub(settings);
+		hub.handleInput("c");
+		expect(strip()).toContain("Map it with /agent-profile set dev");
+	});
+
+	test("the model property strip maps via /agent-profile instead of picking, when the command is registered", async () => {
+		const settings = createSettings();
+		const calls: string[] = [];
+		const { hub, strip } = await createHub(settings, {
+			hasAgentProfileCommand: () => true,
+			runAgentProfileSet: async name => {
+				calls.push(name);
+			},
+		});
+		hub.handleInput("\r"); // agent strip
+		expect(strip()).toContain("set by /agent-profile");
+		hub.handleInput("\r"); // model value strip
+		expect(strip()).toContain("map with /agent-profile");
+		hub.handleInput("\r");
+		expect(calls).toEqual(["dev"]);
 	});
 });

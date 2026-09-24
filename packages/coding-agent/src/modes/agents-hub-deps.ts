@@ -1,12 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AgentsHubDeps } from "@oh-my-pi/pi-tui/overlays/agents-hub";
+import type { AgentsHubDeps, GeneratedAgentSpec, HubAgentOrigin } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { getConfigDirs } from "../config";
+import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	resolveAgentAdvisorSelection,
@@ -22,6 +22,7 @@ import { createAgentSession } from "../sdk";
 import { refreshAgentDiscovery } from "../task";
 import { discoverAgents } from "../task/discovery";
 import { resolveAgentPrewalkDefault } from "../task/prewalk";
+import type { AgentDefinition } from "../task/types";
 import { createModelBrowserSource } from "./model-browser-source";
 
 import {
@@ -52,6 +53,60 @@ function extractAssistantText(messages: AgentMessage[]): string | null {
 	return null;
 }
 
+/** Frontmatter object built from a form spec, kebab-cased where `parseAgentFields` expects it. */
+function buildAgentFrontmatter(spec: GeneratedAgentSpec): Record<string, unknown> {
+	const fields: Record<string, unknown> = { name: spec.identifier, description: spec.whenToUse };
+	if (spec.tools && spec.tools.length > 0) fields.tools = spec.tools;
+	if (spec.thinkingLevel) fields["thinking-level"] = spec.thinkingLevel;
+	if (spec.model) fields.model = spec.model;
+	return fields;
+}
+
+function agentFileContent(spec: GeneratedAgentSpec): string {
+	const frontmatter = YAML.stringify(buildAgentFrontmatter(spec), null, 2).trimEnd();
+	return `---\n${frontmatter}\n---\n\n${spec.systemPrompt.trim()}\n`;
+}
+
+/** The four agent roots the hub distinguishes: writable project/user `.omp`, and read-only everything else. */
+interface AgentRoots {
+	projectOmp?: string;
+	projectClaude?: string;
+	userOmp?: string;
+}
+
+function resolveAgentRoots(cwd: string): AgentRoots {
+	const nearestProjectDirs = findAllNearestProjectConfigDirs("agents", cwd);
+	const projectOmp = nearestProjectDirs.find(entry => entry.source === ".omp")?.path;
+	const projectClaude = nearestProjectDirs.find(entry => entry.source === ".claude")?.path;
+	const userOmp = getConfigDirs("agents", { project: false }).find(entry => entry.source === ".omp")?.path;
+	return {
+		projectOmp: projectOmp ? path.resolve(projectOmp) : undefined,
+		projectClaude: projectClaude ? path.resolve(projectClaude) : undefined,
+		userOmp: userOmp ? path.resolve(userOmp) : undefined,
+	};
+}
+
+function classifyAgentOrigin(
+	filePath: string | undefined,
+	isBundled: boolean,
+	roots: AgentRoots,
+): { origin: HubAgentOrigin; editable: boolean } {
+	if (isBundled || !filePath) return { origin: "bundled", editable: false };
+	const dir = path.resolve(path.dirname(filePath));
+	if (roots.projectOmp && dir === roots.projectOmp) return { origin: "project-omp", editable: true };
+	if (roots.projectClaude && dir === roots.projectClaude) return { origin: "project-claude", editable: false };
+	if (roots.userOmp && dir === roots.userOmp) return { origin: "user", editable: true };
+	return { origin: "plugin", editable: false };
+}
+
+/** Refuses to touch a file outside the writable project/user `.omp` agent roots. */
+function assertWritableAgentPath(filePath: string, cwd: string): void {
+	const roots = resolveAgentRoots(cwd);
+	const dir = path.resolve(path.dirname(filePath));
+	if (dir === roots.projectOmp || dir === roots.userOmp) return;
+	throw new Error(`${shortenPath(filePath)} is not in a writable agent directory (project or user .omp/agents).`);
+}
+
 export function createAgentsHubDeps(
 	cwd: string,
 	settings: Settings,
@@ -59,6 +114,12 @@ export function createAgentsHubDeps(
 	extensionRoots: () => EffectiveExtensionRoots,
 	activeModelPattern?: string,
 	defaultModelPattern?: string,
+	commandRunner?: {
+		/** Whether a slash command of this name is registered on the session. */
+		hasCommand: (name: string) => boolean;
+		/** Run `text` (e.g. `"/agent-profile set scout"`) the way a typed slash command runs. */
+		runCommand: (text: string) => Promise<boolean>;
+	},
 ): AgentsHubDeps {
 	return {
 		browserSource: createModelBrowserSource(settings),
@@ -68,11 +129,15 @@ export function createAgentsHubDeps(
 			const overrides = cfgTaskAgentModelOverrides.get(settings);
 			const prewalkOverrides = cfgTaskAgentPrewalk.get(settings);
 			const advisorOverrides = cfgTaskAgentAdvisor.get(settings);
+			const roots = resolveAgentRoots(cwd);
 			return agents.map(agent => {
 				const override = overrides[agent.name];
 				const overrideModel = (Array.isArray(override) ? override.join(",") : (override ?? "")).trim();
+				const { origin, editable } = classifyAgentOrigin(agent.filePath, agent.source === "bundled", roots);
 				return {
 					...agent,
+					origin,
+					editable,
 					disabled: disabled.has(agent.name),
 					overrideModel: overrideModel || undefined,
 					prewalkOverride: prewalkOverrides[agent.name]?.trim() || undefined,
@@ -103,7 +168,9 @@ export function createAgentsHubDeps(
 		effectivePrewalkPattern: agent =>
 			resolveAgentPrewalkPattern({
 				settingsOverride: agent.prewalkOverride,
-				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+				// HubAgent widens `thinkingLevel` to `string` for the tui-side interface; the value
+				// still came from a real AgentDefinition spread in loadAgents, so this is safe.
+				agentPrewalk: resolveAgentPrewalkDefault(agent as unknown as AgentDefinition, cfgTaskPrewalk.get(settings)),
 			}),
 		effectiveAdvisorPattern: agent => {
 			const selection = resolveAgentAdvisorSelection({
@@ -180,10 +247,28 @@ export function createAgentsHubDeps(
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}
-			const frontmatter = YAML.stringify({ name: spec.identifier, description: spec.whenToUse }, null, 2).trimEnd();
-			await Bun.write(filePath, `---\n${frontmatter}\n---\n\n${spec.systemPrompt.trim()}\n`);
+			await Bun.write(filePath, agentFileContent(spec));
 			await refreshAgentDiscovery(cwd, extensionRoots());
 			return filePath;
+		},
+		updateAgent: async (filePath, spec) => {
+			assertWritableAgentPath(filePath, cwd);
+			await Bun.write(filePath, agentFileContent(spec));
+			await refreshAgentDiscovery(cwd, extensionRoots());
+		},
+		deleteAgent: async filePath => {
+			assertWritableAgentPath(filePath, cwd);
+			const dir = path.dirname(filePath);
+			const trashDir = path.join(dir, ".trash");
+			await fs.mkdir(trashDir, { recursive: true });
+			const base = path.basename(filePath, ".md");
+			const dest = path.join(trashDir, `${base}-${Date.now()}.md`);
+			await fs.rename(filePath, dest);
+			await refreshAgentDiscovery(cwd, extensionRoots());
+		},
+		hasAgentProfileCommand: () => commandRunner?.hasCommand("agent-profile") ?? false,
+		runAgentProfileSet: async agentName => {
+			await commandRunner?.runCommand(`/agent-profile set ${agentName}`);
 		},
 	};
 }

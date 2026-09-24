@@ -8,6 +8,13 @@
  * property opens a value strip whose "pick model…" chip dives into the real
  * ModelBrowser and whose "pattern…" chip opens an inline pattern input, so
  * every per-agent knob is picked instead of memorized.
+ *
+ * `e`/`d` edit or delete a user/project `.omp` agent in place; a read-only
+ * agent (bundled, plugin, or a repo's `.claude/agents`) offers `e` as "copy
+ * to user/project" instead, since its file cannot be rewritten in place.
+ * `c` hands a agent's credential mapping off to `/agent-profile set <name>`
+ * when that extension command is registered on the session; otherwise it
+ * just names the command to run by hand.
  */
 
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -44,6 +51,10 @@ import {
 	type StripChip as HubStripChip,
 	type StripState as HubStripState,
 } from "./hub-frame";
+import { HookEditorComponent } from "./hook-editor";
+
+/** Where an agent's own file lives, for edit/delete gating and the row's source label. */
+export type HubAgentOrigin = "project-omp" | "project-claude" | "user" | "plugin" | "bundled";
 
 /** One agent with its per-agent settings overrides resolved for display. */
 export interface HubAgent {
@@ -53,6 +64,8 @@ export interface HubAgent {
 	source: AgentSource;
 	filePath?: string;
 	model?: string[];
+	tools?: string[];
+	thinkingLevel?: string;
 	prewalk?: boolean | string;
 	advisor?: boolean | string;
 	disabled: boolean;
@@ -62,6 +75,10 @@ export interface HubAgent {
 	prewalkOverride?: string;
 	/** `task.agentAdvisor[name]`: "on", "off", or a model pattern. */
 	advisorOverride?: string;
+	/** Directory this agent's file lives in, resolved against the known agent roots. */
+	origin: HubAgentOrigin;
+	/** Whether the hub may rewrite or delete this agent's file (project `.omp` or user scope). */
+	editable: boolean;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -70,6 +87,13 @@ const SOURCE_LABEL: Record<AgentSource, string> = {
 	bundled: "Bundled",
 };
 const SOURCE_ORDER: Record<AgentSource, number> = { project: 0, user: 1, bundled: 2 };
+const ORIGIN_LABEL: Record<HubAgentOrigin, string> = {
+	"project-omp": "project .omp",
+	"project-claude": "project .claude",
+	user: "user",
+	plugin: "plugin",
+	bundled: "bundled",
+};
 
 interface SidebarEntry extends HubSidebarEntry<"all" | "source" | "new" | "separator"> {
 	source?: AgentSource;
@@ -87,6 +111,12 @@ type StripChip = HubStripChip<
 	| { kind: "set"; property: PropertyKind; value: string | undefined }
 	| { kind: "pick"; property: PropertyKind }
 	| { kind: "pattern"; property: PropertyKind }
+	| { kind: "mapCredential" }
+	| { kind: "edit" }
+	| { kind: "delete" }
+	| { kind: "copy" }
+	| { kind: "keep" }
+	| { kind: "confirmDelete" }
 >;
 
 type StripState =
@@ -97,6 +127,32 @@ export interface GeneratedAgentSpec {
 	identifier: string;
 	whenToUse: string;
 	systemPrompt: string;
+	/** Frontmatter `tools:`; absent/empty inherits the agent's default tool set. */
+	tools?: string[];
+	/** Frontmatter `thinking-level:`. */
+	thinkingLevel?: string;
+	/** Frontmatter `model:`; one selector (a role alias, or `provider/model[:level]`). */
+	model?: string;
+}
+
+/** The one-agent form shared by create-review, copy, and in-place edit. */
+interface AgentFormState {
+	mode: "create" | "copy" | "edit";
+	/** Only meaningful for create/copy: which config dir the file lands in. */
+	scope: "project" | "user";
+	/** Set only for `mode: "edit"`: the file rewritten in place. */
+	filePath?: string;
+	/** Read-only display; also the frontmatter `name:` written back. */
+	name: string;
+	description: string;
+	/** Comma-separated tool list, "" = inherit the agent's default tools. */
+	tools: string;
+	thinkingLevel: string;
+	model: string;
+	systemPrompt: string;
+	/** Non-null while a single field's inline `Input` editor is open. */
+	field: "description" | "tools" | "thinkingLevel" | "model" | null;
+	fieldInput: Input | null;
 }
 
 /** Runtime-owned discovery, settings, generation and persistence. */
@@ -112,6 +168,16 @@ export interface AgentsHubDeps {
 	setOverrides: (property: PropertyKind, overrides: Record<string, string>) => void;
 	generateAgent: (description: string, onText: (text: string) => void) => Promise<string>;
 	saveAgent: (scope: "project" | "user", spec: GeneratedAgentSpec) => Promise<string>;
+	/** Rewrite an existing user/project `.omp` agent's frontmatter and body in place. */
+	updateAgent: (filePath: string, spec: GeneratedAgentSpec) => Promise<void>;
+	/** Move an existing user/project `.omp` agent's file to its directory's `.trash/`. */
+	deleteAgent: (filePath: string) => Promise<void>;
+	/** Edit long text (the system prompt) in the host's configured `$VISUAL`/`$EDITOR`. */
+	externalEditor?: (text: string) => Promise<string | null>;
+	/** Whether the `/agent-profile` extension command is registered on the session. */
+	hasAgentProfileCommand: () => boolean;
+	/** Run `/agent-profile set <name>` the way a typed slash command runs. */
+	runAgentProfileSet: (agentName: string) => Promise<void>;
 }
 
 export interface AgentsHubCallbacks {
@@ -157,7 +223,7 @@ function parseGeneratedAgentSpec(raw: string): GeneratedAgentSpec {
 }
 
 function matchAgent(agent: HubAgent, query: string): boolean {
-	const text = `${agent.name} ${agent.description} ${SOURCE_LABEL[agent.source]} ${agent.overrideModel ?? ""}`;
+	const text = `${agent.name} ${agent.description} ${ORIGIN_LABEL[agent.origin]} ${agent.overrideModel ?? ""}`;
 	return query
 		.trim()
 		.split(/\s+/)
@@ -192,19 +258,24 @@ export class AgentsHubComponent implements Component {
 	#assigning: { agent: HubAgent; property: PropertyKind } | null = null;
 	#browser: ModelBrowser;
 
-	// Create flow (AI-generated agent definition).
+	// Create / copy / edit flow (one agent's fields, form-shaped).
 	#createInput: Editor | null = null;
 	#createDescription = "";
 	#createScope: "project" | "user" = "project";
 	#createGenerating = false;
-	#createSpec: GeneratedAgentSpec | null = null;
 	#createError: string | null = null;
 	#createStreamingText = "";
+	/** Non-null once a spec exists to review — from AI generation, from a copy source, or from an existing agent. */
+	#form: AgentFormState | null = null;
+	/** Non-null while the system prompt is open in the multiline dialog (with `$EDITOR` escape). */
+	#promptEditor: HookEditorComponent | null = null;
 
 	#renderBodyPane = (width: number, height: number | undefined): readonly string[] => {
 		const rows = Math.max(1, Math.floor(height ?? 10));
 		const lines: string[] = [this.#statusRow(width)];
-		if (this.#createActive) {
+		if (this.#promptEditor) {
+			lines.push(...this.#promptEditor.render(width));
+		} else if (this.#createActive) {
 			lines.push(...this.#renderCreate(width, rows - 1));
 		} else if (this.#assigning) {
 			this.#browser.setMaxVisible(rows - 1 - 5);
@@ -406,11 +477,33 @@ export class AgentsHubComponent implements Component {
 		}
 	}
 
+	/** Fire `/agent-profile set <name>` when the command is registered; otherwise just say so. */
+	#runAgentProfileMapping(agentName: string): void {
+		if (!this.#deps.hasAgentProfileCommand()) {
+			this.#notice = `Map it with /agent-profile set ${agentName}`;
+			this.#tui.requestRender();
+			return;
+		}
+		this.#notice = `Running /agent-profile set ${agentName}…`;
+		this.#tui.requestRender();
+		void this.#deps
+			.runAgentProfileSet(agentName)
+			.then(() => {
+				this.#notice = `/agent-profile set ${agentName} done`;
+				this.#tui.requestRender();
+			})
+			.catch(error => {
+				this.#notice = `/agent-profile set ${agentName} failed: ${error instanceof Error ? error.message : String(error)}`;
+				this.#tui.requestRender();
+			});
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════
 	// Strips
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#propertySummary(agent: HubAgent, property: PropertyKind): string {
+		if (property === "model" && this.#deps.hasAgentProfileCommand()) return "set by /agent-profile";
 		switch (property) {
 			case "model":
 				return agent.overrideModel ?? "auto";
@@ -442,16 +535,34 @@ export class AgentsHubComponent implements Component {
 				action: { kind: "property", property },
 			};
 		};
-		this.#strip = {
-			kind: "chips",
-			agent,
-			chips: [enabledChip, propertyChip("model"), propertyChip("prewalk"), propertyChip("advisor")],
-			index: 1,
-		};
+		const chips: StripChip[] = [enabledChip, propertyChip("model"), propertyChip("prewalk"), propertyChip("advisor")];
+		if (agent.editable) {
+			chips.push({ label: "edit", styled: theme.fg("accent", "edit"), action: { kind: "edit" } });
+			chips.push({ label: "delete", styled: theme.fg("error", "delete"), action: { kind: "delete" } });
+		} else {
+			chips.push({ label: "copy…", styled: theme.fg("accent", "copy…"), action: { kind: "copy" } });
+		}
+		this.#strip = { kind: "chips", agent, chips, index: 1 };
 	}
 
 	/** Level-2 strip: value choices for one property of `agent`. */
 	#openPropertyStrip(agent: HubAgent, property: PropertyKind): void {
+		if (property === "model" && this.#deps.hasAgentProfileCommand()) {
+			this.#strip = {
+				kind: "chips",
+				agent,
+				property,
+				chips: [
+					{
+						label: "map with /agent-profile",
+						styled: theme.fg("accent", "map with /agent-profile"),
+						action: { kind: "mapCredential" },
+					},
+				],
+				index: 0,
+			};
+			return;
+		}
 		const current = this.#overrideFor(agent, property)?.toLowerCase();
 		const chips: StripChip[] = [];
 		const mark = (label: string, active: boolean, color: "accent" | "muted" = "muted"): string =>
@@ -511,6 +622,23 @@ export class AgentsHubComponent implements Component {
 		this.#strip = { kind: "pattern", agent, property, input };
 	}
 
+	/** Confirmation strip for `d` / the "delete" chip: `Keep it` or `Delete <name>`. */
+	#openDeleteConfirm(agent: HubAgent): void {
+		this.#strip = {
+			kind: "chips",
+			agent,
+			chips: [
+				{ label: "Keep it", styled: theme.fg("muted", "Keep it"), action: { kind: "keep" } },
+				{
+					label: `Delete ${agent.name}`,
+					styled: theme.fg("error", `Delete ${agent.name}`),
+					action: { kind: "confirmDelete" },
+				},
+			],
+			index: 0,
+		};
+	}
+
 	#closeStrip(): void {
 		this.#strip = null;
 		this.#frame.chipRanges = [];
@@ -541,6 +669,39 @@ export class AgentsHubComponent implements Component {
 			case "pattern":
 				this.#openPatternStrip(strip.agent, action.property);
 				return;
+			case "mapCredential":
+				this.#closeStrip();
+				this.#runAgentProfileMapping(strip.agent.name);
+				return;
+			case "edit":
+				this.#closeStrip();
+				this.#beginEditFlow(strip.agent);
+				return;
+			case "delete":
+				this.#openDeleteConfirm(strip.agent);
+				return;
+			case "copy":
+				this.#closeStrip();
+				this.#beginCopyFlow(strip.agent);
+				return;
+			case "keep":
+				this.#closeStrip();
+				return;
+			case "confirmDelete": {
+				const agent = strip.agent;
+				this.#closeStrip();
+				void this.#deps
+					.deleteAgent(agent.filePath ?? "")
+					.then(async () => {
+						this.#notice = `Deleted ${agent.name}`;
+						await this.#reload();
+					})
+					.catch(error => {
+						this.#notice = `Delete failed: ${error instanceof Error ? error.message : String(error)}`;
+						this.#tui.requestRender();
+					});
+				return;
+			}
 		}
 	}
 
@@ -580,17 +741,17 @@ export class AgentsHubComponent implements Component {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// Create flow
+	// Create / copy / edit flow
 	// ═══════════════════════════════════════════════════════════════════════
 
 	get #createActive(): boolean {
-		return this.#createInput !== null || this.#createGenerating || this.#createSpec !== null;
+		return this.#createInput !== null || this.#createGenerating || this.#form !== null;
 	}
 
 	#beginCreateFlow(): void {
 		if (this.#createGenerating) return;
 		this.#createError = null;
-		this.#createSpec = null;
+		this.#form = null;
 		this.#createDescription = "";
 		const editor = new Editor(getEditorTheme());
 		editor.setBorderVisible(false);
@@ -604,13 +765,56 @@ export class AgentsHubComponent implements Component {
 		this.#tui.requestRender();
 	}
 
+	/** Read-only agent (bundled, plugin, or a repo's `.claude/agents`): copy it into an editable scope. */
+	#beginCopyFlow(agent: HubAgent): void {
+		this.#createError = null;
+		this.#createInput = null;
+		this.#createGenerating = false;
+		this.#form = {
+			mode: "copy",
+			scope: agent.origin === "user" ? "project" : "user",
+			name: agent.name,
+			description: agent.description,
+			tools: (agent.tools ?? []).join(", "),
+			thinkingLevel: agent.thinkingLevel ?? "",
+			model: (agent.model ?? []).join(","),
+			systemPrompt: agent.systemPrompt,
+			field: null,
+			fieldInput: null,
+		};
+		this.#tui.requestRender();
+	}
+
+	/** An editable (project `.omp` or user) agent: rewrite its file in place. Name stays read-only. */
+	#beginEditFlow(agent: HubAgent): void {
+		if (!agent.editable || !agent.filePath) return;
+		this.#createError = null;
+		this.#createInput = null;
+		this.#createGenerating = false;
+		this.#form = {
+			mode: "edit",
+			scope: agent.origin === "user" ? "user" : "project",
+			filePath: agent.filePath,
+			name: agent.name,
+			description: agent.description,
+			tools: (agent.tools ?? []).join(", "),
+			thinkingLevel: agent.thinkingLevel ?? "",
+			model: (agent.model ?? []).join(","),
+			systemPrompt: agent.systemPrompt,
+			field: null,
+			fieldInput: null,
+		};
+		this.#tui.requestRender();
+	}
+
 	#clearCreateFlow(): void {
 		this.#createInput = null;
 		this.#createDescription = "";
 		this.#createGenerating = false;
-		this.#createSpec = null;
+		this.#form = null;
 		this.#createError = null;
 		this.#createStreamingText = "";
+		this.#promptEditor = null;
 	}
 
 	async #generateAgentFromDescription(rawDescription: string): Promise<void> {
@@ -623,12 +827,23 @@ export class AgentsHubComponent implements Component {
 		}
 		this.#createGenerating = true;
 		this.#createError = null;
-		this.#createSpec = null;
+		this.#form = null;
 		this.#createStreamingText = "";
 		this.#tui.requestRender();
 		try {
 			const spec = await this.#runAgentCreationArchitect(description);
-			this.#createSpec = spec;
+			this.#form = {
+				mode: "create",
+				scope: this.#createScope,
+				name: spec.identifier,
+				description: spec.whenToUse,
+				tools: "",
+				thinkingLevel: "",
+				model: "",
+				systemPrompt: spec.systemPrompt,
+				field: null,
+				fieldInput: null,
+			};
 			this.#notice = null;
 		} catch (error) {
 			this.#createError = error instanceof Error ? error.message : String(error);
@@ -646,13 +861,66 @@ export class AgentsHubComponent implements Component {
 		return parseGeneratedAgentSpec(raw);
 	}
 
-	async #saveGeneratedAgent(): Promise<void> {
-		const spec = this.#createSpec;
-		if (!spec) return;
-		const filePath = await this.#deps.saveAgent(this.#createScope, spec);
+	/** Open a single-line `Input` editor for one form field, prefilled with its current value. */
+	#openFormField(form: AgentFormState, field: "description" | "tools" | "thinkingLevel" | "model"): void {
+		const input = new Input();
+		input.setValue(form[field]);
+		form.field = field;
+		form.fieldInput = input;
+		this.#tui.requestRender();
+	}
+
+	/** Open the system prompt in the multiline dialog, with `$EDITOR` as an escape hatch. */
+	#openPromptEditor(): void {
+		const form = this.#form;
+		if (!form) return;
+		this.#promptEditor = new HookEditorComponent(
+			this.#tui,
+			"System prompt",
+			form.systemPrompt,
+			value => {
+				form.systemPrompt = value;
+				this.#promptEditor = null;
+				this.#tui.requestRender();
+			},
+			() => {
+				this.#promptEditor = null;
+				this.#tui.requestRender();
+			},
+			{ externalEditor: this.#deps.externalEditor },
+		);
+		this.#tui.requestRender();
+	}
+
+	async #submitForm(): Promise<void> {
+		const form = this.#form;
+		if (!form) return;
+		const spec: GeneratedAgentSpec = {
+			identifier: form.name,
+			whenToUse: form.description,
+			systemPrompt: form.systemPrompt,
+			tools: form.tools.trim()
+				? form.tools
+						.split(",")
+						.map(s => s.trim())
+						.filter(Boolean)
+				: undefined,
+			thinkingLevel: form.thinkingLevel.trim() || undefined,
+			model: form.model.trim() || undefined,
+		};
+		if (form.mode === "edit") {
+			if (!form.filePath) throw new Error("Missing file path for this agent.");
+			await this.#deps.updateAgent(form.filePath, spec);
+			this.#clearCreateFlow();
+			this.#notice = `Updated agent ${spec.identifier}`;
+			await this.#reload();
+			return;
+		}
+		const filePath = await this.#deps.saveAgent(form.scope, spec);
 		this.#clearCreateFlow();
-		this.#notice = `Created agent ${spec.identifier} at ${shortenPath(filePath)}`;
+		this.#notice = `${form.mode === "copy" ? "Copied" : "Created"} agent ${spec.identifier} at ${shortenPath(filePath)}`;
 		await this.#reload();
+		this.#runAgentProfileMapping(spec.identifier);
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -662,6 +930,12 @@ export class AgentsHubComponent implements Component {
 	handleInput(data: string): void {
 		if (data.startsWith("\x1b[<")) {
 			routeSgrMouseInput(data, event => this.#routeMouseEvent(event));
+			this.#tui.requestRender();
+			return;
+		}
+
+		if (this.#promptEditor) {
+			this.#promptEditor.handleInput(data);
 			this.#tui.requestRender();
 			return;
 		}
@@ -763,6 +1037,29 @@ export class AgentsHubComponent implements Component {
 			if (agent) this.#toggleAgent(agent);
 			return;
 		}
+		if ((data === "e" || data === "E") && this.#searchQuery.length === 0) {
+			const agent = this.#selectedAgent();
+			if (agent) {
+				if (agent.editable) this.#beginEditFlow(agent);
+				else this.#beginCopyFlow(agent);
+			}
+			return;
+		}
+		if ((data === "d" || data === "D") && this.#searchQuery.length === 0) {
+			const agent = this.#selectedAgent();
+			if (agent) {
+				if (agent.editable) this.#openDeleteConfirm(agent);
+				else
+					this.#notice = `${agent.name} is read-only (${ORIGIN_LABEL[agent.origin]}) — press e to copy it first.`;
+			}
+			this.#tui.requestRender();
+			return;
+		}
+		if ((data === "c" || data === "C") && this.#searchQuery.length === 0) {
+			const agent = this.#selectedAgent();
+			if (agent) this.#runAgentProfileMapping(agent.name);
+			return;
+		}
 		if (matchesKey(data, "backspace")) {
 			if (this.#searchQuery.length > 0) {
 				this.#searchQuery = this.#searchQuery.slice(0, -1);
@@ -824,25 +1121,8 @@ export class AgentsHubComponent implements Component {
 	}
 
 	#handleCreateInput(data: string): void {
-		if (this.#createSpec) {
-			if (matchesSelectCancel(data)) {
-				this.#clearCreateFlow();
-				return;
-			}
-			if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
-				this.#createScope = this.#createScope === "project" ? "user" : "project";
-				return;
-			}
-			if (data.toLowerCase() === "r") {
-				void this.#generateAgentFromDescription(this.#createDescription);
-				return;
-			}
-			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-				void this.#saveGeneratedAgent().catch(error => {
-					this.#createError = error instanceof Error ? error.message : String(error);
-					this.#tui.requestRender();
-				});
-			}
+		if (this.#form) {
+			this.#handleFormInput(data);
 			return;
 		}
 		if (matchesSelectCancel(data)) {
@@ -865,6 +1145,80 @@ export class AgentsHubComponent implements Component {
 		}
 		this.#createInput?.handleInput(data);
 		this.#createDescription = this.#createInput?.getExpandedText() ?? "";
+	}
+
+	#handleFormInput(data: string): void {
+		const form = this.#form;
+		if (!form) return;
+		if (form.field) {
+			if (matchesSelectCancel(data)) {
+				form.field = null;
+				form.fieldInput = null;
+				return;
+			}
+			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+				const value = form.fieldInput?.getValue() ?? "";
+				switch (form.field) {
+					case "description":
+						form.description = value;
+						break;
+					case "tools":
+						form.tools = value;
+						break;
+					case "thinkingLevel":
+						form.thinkingLevel = value;
+						break;
+					case "model":
+						form.model = value;
+						break;
+				}
+				form.field = null;
+				form.fieldInput = null;
+				return;
+			}
+			form.fieldInput?.handleInput(data);
+			return;
+		}
+		if (matchesSelectCancel(data)) {
+			this.#clearCreateFlow();
+			return;
+		}
+		if ((matchesKey(data, "tab") || matchesKey(data, "shift+tab")) && form.mode !== "edit") {
+			form.scope = form.scope === "project" ? "user" : "project";
+			return;
+		}
+		if (form.mode === "create" && (data === "r" || data === "R")) {
+			this.#form = null;
+			void this.#generateAgentFromDescription(this.#createDescription);
+			return;
+		}
+		if (data === "d" || data === "D") {
+			this.#openFormField(form, "description");
+			return;
+		}
+		if (data === "t" || data === "T") {
+			this.#openFormField(form, "tools");
+			return;
+		}
+		if (data === "l" || data === "L") {
+			this.#openFormField(form, "thinkingLevel");
+			return;
+		}
+		if (data === "m" || data === "M") {
+			this.#openFormField(form, "model");
+			return;
+		}
+		if (data === "p" || data === "P") {
+			this.#openPromptEditor();
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			void this.#submitForm().catch(error => {
+				this.#createError = error instanceof Error ? error.message : String(error);
+				this.#tui.requestRender();
+			});
+			return;
+		}
 	}
 
 	#moveSidebar(delta: number): void {
@@ -892,6 +1246,8 @@ export class AgentsHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
+		if (this.#promptEditor) return true;
+
 		const { footerColumn, bodyHeight, contentLine, overSidebar, overBody, bodyLine } = this.#frame.locate(
 			event.row,
 			event.col,
@@ -1041,7 +1397,7 @@ export class AgentsHubComponent implements Component {
 			if (prewalk) badges.push(theme.fg("dim", `pre:${prewalk}`));
 			const advisor = this.#deps.effectiveAdvisorPattern(agent);
 			if (advisor) badges.push(theme.fg("dim", `adv:${advisor}`));
-			const sourceTag = theme.fg("dim", SOURCE_LABEL[agent.source].toLowerCase());
+			const sourceTag = theme.fg("dim", ORIGIN_LABEL[agent.origin]);
 			let line = ` ${cursor} ${dot} ${nameStyled}  ${sourceTag}`;
 			const right = badges.join("  ");
 			const rightWidth = visibleWidth(right);
@@ -1087,60 +1443,109 @@ export class AgentsHubComponent implements Component {
 	}
 
 	#renderCreate(width: number, rows: number): string[] {
+		if (this.#form?.field) return this.#renderFormField(width, rows);
+		if (this.#form) return this.#renderFormScreen(width, rows);
+		return this.#renderDescribeStep(width, rows);
+	}
+
+	#renderFormField(width: number, rows: number): string[] {
+		const form = this.#form;
+		if (!form || !form.field || !form.fieldInput) return [];
+		const labels: Record<string, string> = {
+			description: "Description",
+			tools: "Tools (comma-separated; empty = agent default)",
+			thinkingLevel: "Thinking level (empty = agent default)",
+			model: "Model pattern (empty = session model)",
+		};
+		const lines: string[] = [];
+		lines.push(truncateToWidth(theme.bold(theme.fg("accent", ` ${labels[form.field]}`)), width));
+		lines.push("");
+		lines.push(truncateToWidth(` ${form.fieldInput.render(Math.max(20, width - 4))[0] ?? ""}`, width));
+		while (lines.length < rows) lines.push("");
+		return lines.slice(0, rows);
+	}
+
+	#renderFormScreen(width: number, rows: number): string[] {
+		const form = this.#form;
+		if (!form) return [];
+		const lines: string[] = [];
+		const heading =
+			form.mode === "edit" ? "Edit agent" : form.mode === "copy" ? "Copy agent" : "Review generated agent";
+		lines.push(truncateToWidth(theme.bold(theme.fg("accent", ` ${heading}`)), width));
+		lines.push("");
+		lines.push(truncateToWidth(theme.fg("muted", ` Name: ${form.name}`), width));
+		if (form.mode !== "edit") {
+			lines.push(truncateToWidth(theme.fg("muted", ` Scope: ${form.scope}`), width));
+		}
+		lines.push(truncateToWidth(`${theme.fg("muted", " Description:")} ${replaceTabs(form.description)}`, width));
+		lines.push(
+			truncateToWidth(
+				`${theme.fg("muted", " Tools:")} ${form.tools ? replaceTabs(form.tools) : theme.fg("dim", "(agent default)")}`,
+				width,
+			),
+		);
+		lines.push(
+			truncateToWidth(
+				`${theme.fg("muted", " Thinking level:")} ${form.thinkingLevel ? form.thinkingLevel : theme.fg("dim", "(agent default)")}`,
+				width,
+			),
+		);
+		lines.push(
+			truncateToWidth(
+				`${theme.fg("muted", " Model:")} ${form.model ? form.model : theme.fg("dim", "(session model)")}`,
+				width,
+			),
+		);
+		lines.push("");
+		lines.push(theme.fg("muted", " systemPrompt preview:"));
+		const promptWidth = Math.max(20, width - 4);
+		const wrapped: string[] = [];
+		for (const raw of form.systemPrompt.split("\n")) {
+			for (const w of wrapTextWithAnsi(replaceTabs(raw), promptWidth)) wrapped.push(w);
+		}
+		const budget = Math.max(3, rows - lines.length - 3);
+		for (const line of wrapped.slice(0, budget)) {
+			lines.push(truncateToWidth(`   ${theme.fg("dim", line)}`, width));
+		}
+		if (wrapped.length > budget) {
+			lines.push(theme.fg("dim", `   … ${wrapped.length - budget} more lines`));
+		}
+		if (this.#createError) {
+			lines.push("");
+			lines.push(truncateToWidth(theme.fg("error", ` ${replaceTabs(this.#createError)}`), width));
+		}
+		while (lines.length < rows) lines.push("");
+		return lines.slice(0, rows);
+	}
+
+	#renderDescribeStep(width: number, rows: number): string[] {
 		const lines: string[] = [];
 		lines.push("");
-		if (this.#createSpec) {
-			const spec = this.#createSpec;
-			lines.push(truncateToWidth(theme.bold(theme.fg("accent", " Review generated agent")), width));
-			lines.push("");
-			lines.push(truncateToWidth(theme.fg("muted", ` Identifier: ${spec.identifier}`), width));
-			lines.push(truncateToWidth(theme.fg("muted", ` Scope: ${this.#createScope}`), width));
-			lines.push("");
-			lines.push(theme.fg("muted", " whenToUse:"));
-			for (const line of wrapTextWithAnsi(replaceTabs(spec.whenToUse), Math.max(20, width - 2)).slice(0, 6)) {
-				lines.push(truncateToWidth(` ${line}`, width));
+		lines.push(truncateToWidth(theme.bold(theme.fg("accent", " Create new agent")), width));
+		lines.push("");
+		lines.push(
+			truncateToWidth(
+				theme.fg("muted", " Describe what the agent should do; scope: ") + theme.fg("accent", this.#createScope),
+				width,
+			),
+		);
+		lines.push("");
+		if (this.#createInput && !this.#createGenerating) {
+			for (const line of this.#createInput.render(Math.max(20, width - 2))) {
+				lines.push(truncateToWidth(line, width));
 			}
+		}
+		if (this.#createGenerating) {
+			lines.push(theme.fg("muted", " Generating…"));
 			lines.push("");
-			lines.push(theme.fg("muted", " systemPrompt preview:"));
-			const promptWidth = Math.max(20, width - 4);
+			const contentWidth = Math.max(20, width - 4);
 			const wrapped: string[] = [];
-			for (const raw of spec.systemPrompt.split("\n")) {
-				for (const w of wrapTextWithAnsi(replaceTabs(raw), promptWidth)) wrapped.push(w);
+			for (const raw of this.#createStreamingText.split("\n")) {
+				for (const w of wrapTextWithAnsi(replaceTabs(raw), contentWidth)) wrapped.push(w);
 			}
-			const budget = Math.max(3, rows - lines.length - 3);
-			for (const line of wrapped.slice(0, budget)) {
-				lines.push(truncateToWidth(`   ${theme.fg("dim", line)}`, width));
-			}
-			if (wrapped.length > budget) {
-				lines.push(theme.fg("dim", `   … ${wrapped.length - budget} more lines`));
-			}
-		} else {
-			lines.push(truncateToWidth(theme.bold(theme.fg("accent", " Create new agent")), width));
-			lines.push("");
-			lines.push(
-				truncateToWidth(
-					theme.fg("muted", " Describe what the agent should do; scope: ") + theme.fg("accent", this.#createScope),
-					width,
-				),
-			);
-			lines.push("");
-			if (this.#createInput && !this.#createGenerating) {
-				for (const line of this.#createInput.render(Math.max(20, width - 2))) {
-					lines.push(truncateToWidth(line, width));
-				}
-			}
-			if (this.#createGenerating) {
-				lines.push(theme.fg("muted", " Generating…"));
-				lines.push("");
-				const contentWidth = Math.max(20, width - 4);
-				const wrapped: string[] = [];
-				for (const raw of this.#createStreamingText.split("\n")) {
-					for (const w of wrapTextWithAnsi(replaceTabs(raw), contentWidth)) wrapped.push(w);
-				}
-				const budget = Math.max(3, rows - lines.length - 2);
-				for (const line of wrapped.slice(-budget)) {
-					lines.push(truncateToWidth(`  ${theme.fg("dim", line)}`, width));
-				}
+			const budget = Math.max(3, rows - lines.length - 2);
+			for (const line of wrapped.slice(-budget)) {
+				lines.push(truncateToWidth(`  ${theme.fg("dim", line)}`, width));
 			}
 		}
 		if (this.#createError) {
@@ -1152,6 +1557,9 @@ export class AgentsHubComponent implements Component {
 	}
 
 	#footerHint(): string {
+		if (this.#promptEditor) {
+			return "ctrl+q/ctrl+enter apply · esc cancel · ctrl+g external editor";
+		}
 		if (this.#strip) {
 			if (this.#strip.kind === "pattern") {
 				const property = this.#strip.property;
@@ -1164,14 +1572,20 @@ export class AgentsHubComponent implements Component {
 			return "Enter pick · ↑/↓ models · type to search · Esc cancel";
 		}
 		if (this.#createActive) {
-			if (this.#createSpec) return "Enter save · Tab scope · r regenerate · Esc cancel";
+			const form = this.#form;
+			if (form) {
+				if (form.field) return "Enter apply · Esc cancel";
+				const scopeHint = form.mode === "edit" ? "" : "Tab scope · ";
+				const regenHint = form.mode === "create" ? "r regenerate · " : "";
+				return `d description · t tools · l thinking-level · m model · p prompt · ${scopeHint}${regenHint}Enter save · Esc cancel`;
+			}
 			if (this.#createGenerating) return "Generating…";
 			return "Ctrl+Q/Ctrl+Enter generate · Enter newline · Tab scope · Esc cancel";
 		}
 		if (this.#focus === "scope") {
 			return "↑/↓ scopes · →/Enter agents · Esc close";
 		}
-		return "Enter configure · Space enable/disable · ↑/↓ rows · type to search · Ctrl+R reload · Esc close";
+		return "Enter configure · Space enable/disable · e edit/copy · d delete · c map credential · ↑/↓ rows · type to search · Ctrl+R reload · Esc close";
 	}
 
 	#renderFooter(width: number): string {

@@ -587,6 +587,10 @@ export class SelectorController {
 				() => this.ctx.session.effectiveExtensionRoots,
 				activeModelPattern,
 				defaultModelPattern,
+				{
+					hasCommand: name => this.ctx.session.extensionRunner?.getCommand(name) !== undefined,
+					runCommand: text => this.ctx.session.prompt(text, { expandPromptTemplates: true }),
+				},
 			),
 			{ onCancel: () => done() },
 		);
