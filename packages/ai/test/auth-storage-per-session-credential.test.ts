@@ -111,4 +111,36 @@ describe("AuthStorage: each session keeps its own credential", () => {
 		// changes nothing for it.
 		expect(await auth.keys.get(PROVIDER, "session-b")).toContain("access-b");
 	});
+
+	test("clearSessionCredential returns the session to the default, not the row it served while pinned", async () => {
+		const rowLowest = auth.addApiKey(PROVIDER, "sk-lowest");
+		const rowDefault = auth.addApiKey(PROVIDER, "sk-default");
+		auth.setDefaultCredential(PROVIDER, rowDefault);
+
+		expect(auth.pinSessionCredential(PROVIDER, "session-x", rowLowest)).toBe(true);
+		expect(await auth.keys.get(PROVIDER, "session-x")).toBe("sk-lowest");
+
+		// A pin writes through the sticky path too (SessionAffinity.record), so clearing must
+		// drop that sticky row as well — otherwise SessionAffinity.preferred's sticky-before-
+		// default fallback keeps serving the old pinned row after the pin itself is gone.
+		auth.clearSessionCredential(PROVIDER, "session-x");
+		expect(await auth.keys.get(PROVIDER, "session-x")).toBe("sk-default");
+		const afterClear = auth.listCredentials(PROVIDER, "session-x");
+		expect(afterClear.some(row => row.pinned)).toBe(false);
+		expect(afterClear.find(row => row.active)?.id).toBe(rowDefault);
+	});
+
+	test("a pin cleared on one session never leaks its row to an unrelated, never-served session", async () => {
+		const rowLowest = auth.addApiKey(PROVIDER, "sk-lowest2");
+		auth.addApiKey(PROVIDER, "sk-second2");
+
+		// Pin and clear a DIFFERENT session first, matching the selftest's ordering: an earlier
+		// check's pin/clear sequence must not leave state a later, unrelated session can see.
+		expect(auth.pinSessionCredential(PROVIDER, "session-y", rowLowest)).toBe(true);
+		expect(await auth.keys.get(PROVIDER, "session-y")).toBe("sk-lowest2");
+		auth.clearSessionCredential(PROVIDER, "session-y");
+
+		// No pin, no default: a brand-new session id resolves to the lowest enabled row.
+		expect(await auth.keys.get(PROVIDER, "session-z")).toBe("sk-lowest2");
+	});
 });

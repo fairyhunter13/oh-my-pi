@@ -306,10 +306,18 @@ export class SessionAffinity implements SessionsApi {
 		return this.#overrides.configCounts(provider) && this.strictPin(provider, sessionId) === undefined;
 	}
 
-	/** Drop the session's strict pin; the session returns to the default and the pool. */
+	/**
+	 * Drop the session's strict pin; the session returns to the default and the
+	 * pool. Also clears the sticky row the pin served: a pin writes through
+	 * {@link SessionAffinity.record} as well as the strict-pin cache, and
+	 * {@link SessionAffinity.preferred} now falls back to that sticky row before
+	 * the default, so leaving it would make a cleared pin keep serving its old
+	 * row instead of truly returning to the default.
+	 */
 	unpin(provider: string, sessionId: string): void {
 		this.#store.setCache(`${SESSION_PIN_CACHE_PREFIX}${provider}:${sessionId}`, "", 0);
 		this.#rememberStrictPin(provider, sessionId, null);
+		this.clear(provider, sessionId);
 	}
 
 	/**
