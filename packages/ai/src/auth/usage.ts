@@ -429,6 +429,7 @@ export class UsageService implements UsageApi {
 						cacheReadTokens: entry.usage.cacheRead,
 						cacheWriteTokens: entry.usage.cacheWrite,
 						costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
+						credentialId: entry.credentialId ?? null,
 					},
 				],
 				entry.client,

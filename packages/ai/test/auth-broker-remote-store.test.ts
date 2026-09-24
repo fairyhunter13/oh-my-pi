@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -312,6 +313,42 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			const current = storage!.usage.clientSummary(0).clients[0];
 			return current?.providers.find(p => p.provider === "anthropic")?.requests === 3;
 		});
+		// Two credentials of the same provider and model never fold into one
+		// row: each carries its own credential_id, so a per-credential view
+		// can tell them apart even though this DB stays row-per-bucket.
+		clientStorage.usage.observe({
+			provider: "anthropic",
+			model: "claude-x",
+			at: at + 5,
+			usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+			credentialId: 101,
+		});
+		clientStorage.usage.observe({
+			provider: "anthropic",
+			model: "claude-x",
+			at: at + 5,
+			usage: { input: 3, output: 1, cacheRead: 0, cacheWrite: 0 },
+			credentialId: 202,
+		});
+		await waitUntil(() => {
+			const current = storage!.usage.clientSummary(0).clients[0];
+			return current?.providers.find(p => p.provider === "anthropic")?.requests === 5;
+		});
+		const rawDb = new Database(path.join(tempDir, "agent.db"), { readonly: true });
+		try {
+			const rows = rawDb
+				.prepare(
+					"SELECT credential_id, requests FROM client_usage WHERE provider = 'anthropic' AND model = 'claude-x' AND credential_id IS NOT NULL ORDER BY credential_id",
+				)
+				.all() as Array<{ credential_id: number; requests: number }>;
+			expect(rows).toEqual([
+				{ credential_id: 101, requests: 1 },
+				{ credential_id: 202, requests: 1 },
+			]);
+		} finally {
+			rawDb.close();
+		}
+
 		// An explicit identity (the auth-gateway attributing a caller) must
 		// produce its own client row instead of folding into this install.
 		remote.recordObservedUsage(

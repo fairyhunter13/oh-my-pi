@@ -248,6 +248,7 @@ export function recordGatewayUsage(
 	model: Model<Api>,
 	client: ClientUsageIdentity,
 	usage: Usage,
+	credentialId: number | undefined,
 	at?: number,
 ): void {
 	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
@@ -258,6 +259,7 @@ export function recordGatewayUsage(
 		usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
 		costUsd: usage.cost.total,
 		client,
+		credentialId,
 	});
 }
 

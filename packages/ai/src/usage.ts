@@ -221,6 +221,8 @@ export interface ObservedUsageEntry {
 	cacheWriteTokens: number;
 	/** Estimated USD cost of the folded requests (0 when unknown). */
 	costUsd: number;
+	/** Stored row that served these requests; absent or null when no stored row did. */
+	credentialId?: number | null;
 }
 
 /** One client's observed-usage report, keyed by its stable install id. */

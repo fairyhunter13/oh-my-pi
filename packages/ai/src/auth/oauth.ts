@@ -5,6 +5,7 @@ import { getOAuthProvider } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import { OAUTH_LOGIN_REPLACED_CAUSE } from "./credential-catalog";
+import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
 import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
@@ -15,6 +16,7 @@ import type { CredentialSelector } from "./select";
 import type {
 	AuthAccountPolicy,
 	AuthApiKeyOptions,
+	AuthCredential,
 	OAuthAccess,
 	OAuthAccessResolution,
 	OAuthAccountIdentity,
@@ -30,6 +32,13 @@ import type {
 
 /** {@link OAuthAccounts.refreshCredentials} default: refresh a row expiring within 5 minutes. */
 const REFRESH_CREDENTIALS_DEFAULT_SKEW_MS = 5 * 60_000;
+
+/** Describe an OAuth identity for the re-login mismatch message. */
+function who(credential: OAuthCredential): string {
+	const base = credential.email ?? credential.accountId ?? "an account with no email";
+	const org = credential.orgName ?? credential.orgId;
+	return org ? `${base} (${org})` : base;
+}
 
 type StoredOAuthSelection = {
 	credentialId: number;
@@ -118,6 +127,36 @@ export class OAuthAccounts implements OAuthApi {
 		// re-enable exactly those afterward — never a row the user had already disabled
 		// themselves.
 		const storageProvider = def.storeCredentialsAs ?? provider;
+		if (ctrl.replaceCredentialId !== undefined) {
+			const id = ctrl.replaceCredentialId;
+			const catalog = this.#deps.store.credentialCatalog;
+			let targetProvider: string | undefined;
+			let targetCredential: AuthCredential | undefined;
+			if (catalog) {
+				const row = catalog.get(id);
+				if (row) {
+					targetProvider = row.provider;
+					targetCredential =
+						row.credential_type === "oauth"
+							? ({ type: "oauth", ...JSON.parse(row.data) } as OAuthCredential)
+							: undefined;
+				}
+			} else {
+				const entry = this.#deps.store.listAuthCredentials(storageProvider).find(candidate => candidate.id === id);
+				targetProvider = entry?.provider;
+				targetCredential = entry?.credential;
+			}
+			if (targetProvider !== storageProvider || targetCredential?.type !== "oauth") {
+				throw new AIError.ConfigurationError(`${storageProvider} has no subscription #${id} to log in again as.`);
+			}
+			const targetKey = resolveCredentialIdentityKey(storageProvider, targetCredential);
+			const newKey = resolveCredentialIdentityKey(storageProvider, newCredential);
+			if (targetKey === null || newKey === null || targetKey !== newKey) {
+				throw new AIError.ConfigurationError(
+					`Signed in as ${who(newCredential)}, not ${who(targetCredential)}. Nothing was saved.`,
+				);
+			}
+		}
 		const catalog = this.#deps.store.credentialCatalog;
 		const priorEnabledApiKeyIds = catalog
 			? new Set(

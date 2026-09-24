@@ -1313,7 +1313,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		if (this.#closed || this.#observedUsageUnsupported) return;
 		const identity = client ?? { installId: getInstallId(), hostname: os.hostname(), app: getAppName() };
 		for (const entry of entries) {
-			const key = `${identity.installId}\u0000${identity.app ?? ""}\u0000${entry.provider}\u0000${entry.model}`;
+			const key = `${identity.installId}\u0000${identity.app ?? ""}\u0000${entry.provider}\u0000${entry.model}\0${entry.credentialId ?? "none"}`;
 			const pending = this.#observedUsage.get(key);
 			if (pending) {
 				pending.entry.at = Math.max(pending.entry.at, entry.at);

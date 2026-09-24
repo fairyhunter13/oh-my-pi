@@ -389,7 +389,14 @@ async function handleFormatEndpoint(
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+			recordGatewayUsage(
+				bootOpts.storage,
+				model,
+				client,
+				message.usage,
+				message.credentialId,
+				message.timestamp || undefined,
+			);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -445,7 +452,14 @@ async function handleFormatEndpoint(
 		void events
 			.result()
 			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				recordGatewayUsage(
+					bootOpts.storage,
+					model,
+					client,
+					message.usage,
+					message.credentialId,
+					message.timestamp || undefined,
+				),
 			)
 			.catch(() => {})
 			.finally(() => lease.release());
@@ -605,7 +619,14 @@ async function handlePiNative(
 		try {
 			if (controller.signal.aborted) return aborted();
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+			recordGatewayUsage(
+				bootOpts.storage,
+				model,
+				client,
+				message.usage,
+				message.credentialId,
+				message.timestamp || undefined,
+			);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -657,7 +678,14 @@ async function handlePiNative(
 		void events
 			.result()
 			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				recordGatewayUsage(
+					bootOpts.storage,
+					model,
+					client,
+					message.usage,
+					message.credentialId,
+					message.timestamp || undefined,
+				),
 			)
 			.catch(() => {})
 			.finally(() => lease.release());

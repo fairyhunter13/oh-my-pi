@@ -625,12 +625,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				output_tokens INTEGER NOT NULL,
 				cache_read_tokens INTEGER NOT NULL,
 				cache_write_tokens INTEGER NOT NULL,
-				cost_usd REAL NOT NULL DEFAULT 0
+				cost_usd REAL NOT NULL DEFAULT 0,
+				credential_id INTEGER
 			);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_series ON client_usage(install_id, provider, model, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
 		`);
 		this.#ensureClientUsageAppColumn();
+		this.#ensureClientUsageCredentialColumn();
 
 		if (!this.#authCredentialsTableExists()) {
 			this.#createAuthCredentialsTable();
@@ -1390,10 +1392,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * It is the row #purgeSupersededDisabledRows would otherwise hard-delete, whatever disabled it.
 	 */
 	#reviveSupersededRow(provider: string, item: AuthCredential, serialized: SerializedCredentialRecord): number | null {
-		const removed = (this.#listDisabledByProviderStmt.all(provider) as AuthRow[])
-			.filter(row =>
-				matchesReplacementCredential(provider, deserializeCredential(row), resolveRowCredentialIdentityKey(provider, row), item),
-			);
+		const removed = (this.#listDisabledByProviderStmt.all(provider) as AuthRow[]).filter(row =>
+			matchesReplacementCredential(
+				provider,
+				deserializeCredential(row),
+				resolveRowCredentialIdentityKey(provider, row),
+				item,
+			),
+		);
 		const newest = removed.at(-1);
 		if (!newest) return null;
 		this.#reviveStmt.run(serialized.credentialType, serialized.data, serialized.identityKey, newest.id);
@@ -1820,6 +1826,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
+	/**
+	 * Add the `credential_id` column to `client_usage` tables created before
+	 * per-credential attribution existed. Nullable, so no schema version bump
+	 * is needed; a legacy row reads back as unattributed (`NULL`).
+	 */
+	#ensureClientUsageCredentialColumn(): void {
+		const columns = this.#db.query("PRAGMA table_info(client_usage)").all() as Array<{ name: string }>;
+		if (!columns.some(column => column.name === "credential_id")) {
+			this.#db.run("ALTER TABLE client_usage ADD COLUMN credential_id INTEGER");
+		}
+	}
+
 	recordClientUsage(report: ClientUsageReport): void {
 		const now = Date.now();
 		this.#db
@@ -1831,7 +1849,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		const app = report.app?.trim() ?? "";
 		const findBucket = this.#db.query(
 			`SELECT id FROM client_usage
-			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ?
+			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND credential_id IS ? AND recorded_at >= ?
 			 ORDER BY recorded_at DESC LIMIT 1`,
 		);
 		const merge = this.#db.query(
@@ -1840,14 +1858,23 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				cache_write_tokens = cache_write_tokens + ?, cost_usd = cost_usd + ? WHERE id = ?`,
 		);
 		const insert = this.#db.query(
-			`INSERT INTO client_usage (recorded_at, install_id, app, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO client_usage (recorded_at, install_id, app, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, credential_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		for (const entry of report.entries) {
-			// Merge into the newest row of the same (install, provider, model)
-			// bucket so 10s client flushes don't accrete one row apiece forever.
+			// Merge into the newest row of the same (install, provider, model,
+			// credential) bucket so 10s client flushes don't accrete one row
+			// apiece forever. Two credentials of one provider/model never merge.
 			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
-			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
+			const credentialId = entry.credentialId ?? null;
+			const existing = findBucket.get(
+				report.installId,
+				app,
+				entry.provider,
+				entry.model,
+				credentialId,
+				bucketFloor,
+			) as {
 				id: number;
 			} | null;
 			if (existing) {
@@ -1875,6 +1902,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				entry.cacheReadTokens,
 				entry.cacheWriteTokens,
 				entry.costUsd,
+				credentialId,
 			);
 		}
 	}

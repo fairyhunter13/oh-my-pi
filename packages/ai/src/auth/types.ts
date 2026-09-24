@@ -695,6 +695,8 @@ export type ObservedUsageInput = {
 	at?: number;
 	/** Attribution override; defaults to this process's install identity. */
 	client?: ClientUsageIdentity;
+	/** Stored row that served the request; absent when no stored row did. */
+	credentialId?: number;
 };
 
 /** Mark a session credential blocked with caller and provider timing. */
@@ -743,6 +745,8 @@ export type OAuthLoginController = OAuthController & {
 	onAuth: (info: OAuthAuthInfo) => void;
 	/** onPrompt is required for some providers (github-copilot, openai-codex) */
 	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
+	/** Row the user chose to log in again as. A token for another identity is refused, and nothing is stored. */
+	replaceCredentialId?: number;
 };
 
 /** Stored credential pool operations used by the AuthStorage facade. */
@@ -1148,6 +1152,12 @@ export interface UsageApi {
 	 * the call is a no-op.
 	 */
 	observe(entry: ObservedUsageInput): void;
+	/** Fetch the report of one stored credential, OAuth or API key. */
+	report(
+		provider: Provider,
+		credential: AuthCredential,
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<UsageReport | null>;
 	/** Record one client’s observed usage report. */
 	recordClient(report: ClientUsageReport): boolean;
 	/** Aggregate client-observed usage since a timestamp. */

@@ -105,7 +105,7 @@ export async function handleSystemOne(bootOpts: AuthGatewayBootOptions, req: Req
 		// when the upstream reported tokens only (TypeSafe).
 		const body = systemOne.encodeResponse(result);
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage, undefined);
 		return json(200, body, gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }));
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();

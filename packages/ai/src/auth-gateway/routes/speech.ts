@@ -83,7 +83,7 @@ export async function handleSpeech(bootOpts: AuthGatewayBootOptions, req: Reques
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage, undefined);
 		const response = speechWire.encodeResponse(result, parsed.modelId);
 		const responseHeaders = gatewayResponseHeaders(model, {
 			requestId,

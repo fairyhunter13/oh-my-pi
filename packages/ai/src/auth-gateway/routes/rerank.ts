@@ -67,7 +67,7 @@ export async function handleRerank(bootOpts: AuthGatewayBootOptions, req: Reques
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage, undefined);
 		return json(
 			200,
 			rerankWire.encodeResponse(

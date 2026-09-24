@@ -309,6 +309,7 @@ const observedUsageEntrySchema = type({
 	cacheReadTokens: "number",
 	cacheWriteTokens: "number",
 	costUsd: "number",
+	"credentialId?": "number | null",
 });
 
 /** Broker `POST /v1/usage/observed` request — one client's batched observed usage. */

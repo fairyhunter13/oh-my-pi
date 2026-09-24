@@ -79,7 +79,7 @@ export async function handleTranscriptions(
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage, undefined);
 		return json(
 			200,
 			transcriptions.encodeResponse(result),
