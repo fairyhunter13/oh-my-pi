@@ -4,6 +4,7 @@
  * Discovers agent definitions from OMP-native task-agent roots:
  *   - ~/.omp/agent/agents/*.md (user-level)
  *   - .omp/agents/*.md (project-level)
+ *   - .claude/agents/*.md (project-level, Claude dialect: `model:` dropped)
  *   - <ext>/agents/*.md for every OMP extension package wired through
  *     `listOmpExtensionRoots` (CLI `--extension` roots, `extensions:` in
  *     settings, and enabled npm/link plugins under `<plugins>/node_modules/`).
@@ -11,9 +12,10 @@
  *     `hooks/`, `tools/`, etc. by `discovery/omp-plugins.ts`.
  *
  * Claude Code marketplace plugin agents are discovered separately via the
- * claude-plugins provider. Direct cross-harness roots such as .claude/agents
- * are intentionally skipped because their frontmatter schema is not the OMP
- * task-agent contract.
+ * claude-plugins provider. A repo's own `.claude/agents` loads while the
+ * `claude` provider is enabled, with its Claude model aliases dropped and its
+ * tool names normalized. User `~/.claude/agents`, `.codex/agents` and
+ * `.gemini/agents` stay skipped.
  *
  * Agent files use markdown with YAML frontmatter.
  */
@@ -32,6 +34,7 @@ import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
 
 const TASK_AGENT_CONFIG_SOURCE = ".omp";
+const CLAUDE_AGENT_CONFIG_SOURCE = ".claude";
 
 /** Result of agent discovery */
 export interface DiscoveryResult {
@@ -73,10 +76,10 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
 
 /**
  * Discover agents from filesystem and merge with bundled agents.
- * Precedence (highest wins): project `.omp/agents`, user `.omp/agents`,
- * OMP extension-package agents from the effective `extensions` setting,
- * installed npm/link plugins, Claude marketplace plugin agents (project scope
- * before user), then bundled.
+ * Precedence (highest wins): project `.omp/agents`, project `.claude/agents`,
+ * user `.omp/agents`, OMP extension-package agents from the effective
+ * `extensions` setting, installed npm/link plugins, Claude marketplace plugin
+ * agents (project scope before user), then bundled.
  * @param cwd - Current working directory for project agent discovery
  * @param home - Home directory for user and marketplace discovery
  * @param extensionRoots - Session-local extension roots (explicit + mode + configured)
@@ -95,16 +98,19 @@ export async function discoverAgents(
 			path: path.resolve(entry.path),
 		}));
 
-	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
+	const nearestProjectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd).map(entry => ({
+		...entry,
+		path: path.resolve(entry.path),
+	}));
+	const projectDirs = nearestProjectDirs.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE);
 
 	const orderedDirs: AgentDirectory[] = [];
 	const project = projectDirs[0];
 	if (project) orderedDirs.push({ dir: project.path, source: "project" });
+	const claudeProject = isProviderEnabled("claude")
+		? nearestProjectDirs.find(entry => entry.source === CLAUDE_AGENT_CONFIG_SOURCE)
+		: undefined;
+	if (claudeProject) orderedDirs.push({ dir: claudeProject.path, source: "project", ignoreModel: true });
 	const user = userDirs[0];
 	if (user) orderedDirs.push({ dir: user.path, source: "user" });
 

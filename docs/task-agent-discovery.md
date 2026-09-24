@@ -137,19 +137,20 @@ Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter thr
 
 ## Filesystem and plugin discovery
 
-`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from OMP-native roots, OMP extension packages, and Claude marketplace plugin roots before appending bundled definitions. Direct cross-harness roots such as `.claude/agents`, `.codex/agents`, and `.gemini/agents` are intentionally skipped — their frontmatter schema is not the OMP task-agent contract (`TASK_AGENT_CONFIG_SOURCE = ".omp"` filters the native config-dir lists).
+`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from OMP-native roots, a project's `.claude/agents`, OMP extension packages, and Claude marketplace plugin roots before appending bundled definitions. A project's `.claude/agents` loads in the Claude dialect: its `model:` aliases are dropped and its tool names are normalized. User `~/.claude/agents`, `.codex/agents` and `.gemini/agents` stay skipped — their frontmatter schema is not the OMP task-agent contract.
 
 ### Discovery inputs and precedence
 
 1. Nearest project `.omp/agents` dir from `findAllNearestProjectConfigDirs("agents", cwd)` (first `.omp` hit only)
-2. User `.omp/agents` dir from `getConfigDirs("agents", { project: false })` (first `.omp` hit only)
-3. `<extension-root>/agents` for every enabled OMP extension package returned by `listOmpExtensionRoots(...)`, in this order:
+2. Nearest project `.claude/agents` dir from the same call (first `.claude` hit only), with `model:` dropped — only when `isProviderEnabled("claude")`
+3. User `.omp/agents` dir from `getConfigDirs("agents", { project: false })` (first `.omp` hit only)
+4. `<extension-root>/agents` for every enabled OMP extension package returned by `listOmpExtensionRoots(...)`, in this order:
    - CLI `--extension` roots
    - project `extensions:` settings
    - user `extensions:` settings
    - installed npm/link plugins
-4. Claude marketplace plugin roots (`listClaudePluginRoots(home, cwd)`) with `agents/` subdirs — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope
-5. Bundled agents (`loadBundledAgents()`)
+5. Claude marketplace plugin roots (`listClaudePluginRoots(home, cwd)`) with `agents/` subdirs — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope
+6. Bundled agents (`loadBundledAgents()`)
 
 The OMP extension-package surface is disabled when the `omp-plugins` capability provider is disabled. Marketplace roots are excluded from `listOmpExtensionRoots` and enter only through the separately gated Claude-plugin path.
 

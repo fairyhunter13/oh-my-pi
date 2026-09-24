@@ -136,21 +136,56 @@ describe("discoverAgents", () => {
 		await removeWithRetries(tempHome);
 	});
 
-	test("loads OMP agents but skips Claude Code custom agents", async () => {
+	test("loads a project's .claude/agents in the Claude dialect and skips user ~/.claude/agents", async () => {
 		await fs.mkdir(path.join(projectDir, ".omp", "agents"), { recursive: true });
 		await fs.writeFile(path.join(projectDir, ".omp", "agents", "omp-test-agent.md"), OMP_AGENT_MD);
 
 		await fs.mkdir(path.join(tempHome, ".claude", "agents"), { recursive: true });
-		await fs.writeFile(path.join(tempHome, ".claude", "agents", "user-cc-test-agent.md"), CLAUDE_AGENT_MD);
+		await fs.writeFile(
+			path.join(tempHome, ".claude", "agents", "user-cc-agent.md"),
+			CLAUDE_AGENT_MD.replace("name: cc-test-agent", "name: user-cc-agent"),
+		);
 		await fs.mkdir(path.join(projectDir, ".claude", "agents"), { recursive: true });
 		await fs.writeFile(path.join(projectDir, ".claude", "agents", "project-cc-test-agent.md"), CLAUDE_AGENT_MD);
 
 		const { agents, projectAgentsDir } = await discoverAgents(projectDir, tempHome);
 		const names = agents.map(agent => agent.name);
+		const claudeAgent = agents.find(agent => agent.name === "cc-test-agent");
 
 		expect(names).toContain("omp-test-agent");
-		expect(names).not.toContain("cc-test-agent");
+		expect(names).not.toContain("user-cc-agent");
+		expect(claudeAgent?.source).toBe("project");
+		expect(claudeAgent?.model).toBeUndefined();
+		expect(claudeAgent?.tools).toEqual(["read", "grep", "glob", "bash", "yield"]);
 		expect(projectAgentsDir).toBe(path.join(projectDir, ".omp", "agents"));
+	});
+
+	test("a project's .omp agent wins over a same-named .claude agent", async () => {
+		await fs.mkdir(path.join(projectDir, ".omp", "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(projectDir, ".omp", "agents", "cc-test-agent.md"),
+			OMP_AGENT_MD.replace("name: omp-test-agent", "name: cc-test-agent"),
+		);
+		await fs.mkdir(path.join(projectDir, ".claude", "agents"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".claude", "agents", "cc-test-agent.md"), CLAUDE_AGENT_MD);
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const matches = agents.filter(agent => agent.name === "cc-test-agent");
+
+		expect(matches).toHaveLength(1);
+		expect(matches[0].filePath).toBe(path.join(projectDir, ".omp", "agents", "cc-test-agent.md"));
+	});
+
+	test("skips a project's .claude/agents when the claude provider is disabled", async () => {
+		await fs.mkdir(path.join(projectDir, ".claude", "agents"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".claude", "agents", "project-cc-test-agent.md"), CLAUDE_AGENT_MD);
+		disableProvider("claude");
+		try {
+			const { agents } = await discoverAgents(projectDir, tempHome);
+			expect(agents.map(agent => agent.name)).not.toContain("cc-test-agent");
+		} finally {
+			enableProvider("claude");
+		}
 	});
 
 	test("loads agents from OMP npm plugins under <home>/.omp/plugins/node_modules", async () => {
