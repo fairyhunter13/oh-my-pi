@@ -589,7 +589,20 @@ export class SelectorController {
 				defaultModelPattern,
 				{
 					hasCommand: name => this.ctx.session.extensionRunner?.getCommand(name) !== undefined,
-					runCommand: text => this.ctx.session.prompt(text, { expandPromptTemplates: true }),
+					// J-2: the hub is a fullscreen overlay, and `/agent-profile
+					// set`'s own `ctx.ui.select` wizard renders into the same
+					// editor container. `TUI.setFocus` keeps focus on the
+					// topmost visible overlay unless that overlay owns the
+					// target, and the hub does not, so the wizard stayed
+					// hidden behind the hub until Esc closed it. Close the hub
+					// for the round trip and reopen it after — the same shape
+					// as `#loginThenReopenModelHub`.
+					runCommand: async text => {
+						done();
+						const result = await this.ctx.session.prompt(text, { expandPromptTemplates: true });
+						void this.showAgentsDashboard();
+						return result;
+					},
 				},
 			),
 			{ onCancel: () => done() },

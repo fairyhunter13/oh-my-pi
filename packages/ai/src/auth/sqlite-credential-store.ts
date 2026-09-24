@@ -140,7 +140,7 @@ export function serializeCredential(provider: string, credential: AuthCredential
 	return null;
 }
 
-function deserializeCredential(row: AuthRow): AuthCredential | null {
+export function deserializeCredential(row: AuthRow): AuthCredential | null {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(row.data);

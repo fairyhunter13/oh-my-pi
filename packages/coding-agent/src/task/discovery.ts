@@ -51,6 +51,20 @@ interface AgentDirectory {
 	ignoreModel?: boolean;
 }
 
+/** Resolved real path of `p`, or `p` itself when it does not exist or cannot be resolved. */
+async function realpathOrSelf(p: string): Promise<string> {
+	try {
+		return await fs.realpath(p);
+	} catch {
+		return p;
+	}
+}
+
+/** Repo root of an `<root>/.omp/agents` or `<root>/.claude/agents` dir: two levels up. */
+function repoRootOfAgentsDir(agentsDir: string): string {
+	return path.dirname(path.dirname(agentsDir));
+}
+
 /**
  * Load agents from a directory.
  */
@@ -114,13 +128,29 @@ export async function discoverAgents(
 	// `home`, so it reaches Claude Code's own user agents dir
 	// (`~/.claude/agents`, a symlink to `~/.claude-shared/agents`) in every
 	// repo under home with no nearer `.claude/agents` of its own. That dir is
-	// not a repo's own agents, so it is never a candidate here.
-	const homeClaudeAgentsDir = path.join(home, ".claude", "agents");
-	const claudeProject = isProjectClaudeAgentsEnabled()
-		? nearestProjectDirs.find(
-				entry => entry.source === CLAUDE_AGENT_CONFIG_SOURCE && entry.path !== homeClaudeAgentsDir,
-			)
-		: undefined;
+	// not a repo's own agents, so it is never a candidate here. I2-1: compare
+	// real paths, because `home` or one of cwd's ancestors can itself be a
+	// symlink, in which case the plain string join never equals the walked-up
+	// entry even though they name the same directory.
+	const homeClaudeAgentsDir = await realpathOrSelf(path.join(home, ".claude", "agents"));
+	let claudeProject: (typeof nearestProjectDirs)[number] | undefined;
+	if (isProjectClaudeAgentsEnabled()) {
+		for (const entry of nearestProjectDirs) {
+			if (entry.source !== CLAUDE_AGENT_CONFIG_SOURCE) continue;
+			if ((await realpathOrSelf(entry.path)) === homeClaudeAgentsDir) continue;
+			claudeProject = entry;
+			break;
+		}
+	}
+	// G-1: the nearest `.omp/agents` and the nearest `.claude/agents` come
+	// from two independent walk-ups, so a repo nested inside another repo can
+	// have an inner `.omp/agents` and an outer `.claude/agents` at once. ccw's
+	// `repoScope` reads agents from one repo root only. Match it: once a
+	// project `.omp/agents` dir is picked, accept the `.claude` dir only when
+	// it shares that dir's repo root (its grandparent).
+	if (project && claudeProject && repoRootOfAgentsDir(project.path) !== repoRootOfAgentsDir(claudeProject.path)) {
+		claudeProject = undefined;
+	}
 	if (claudeProject) orderedDirs.push({ dir: claudeProject.path, source: "project", ignoreModel: true });
 	const user = userDirs[0];
 	if (user) orderedDirs.push({ dir: user.path, source: "user" });

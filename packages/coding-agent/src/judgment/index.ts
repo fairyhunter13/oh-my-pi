@@ -46,6 +46,8 @@ export interface JudgmentUsage {
 	usage: Usage;
 	stopReason: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	/** D-1: stored credential row that served this attempt, when the response carried one (the "online" chat-model path only; native TypeSafe judgments carry no row). */
+	credentialId?: number;
 }
 
 export interface JudgeDeps {
@@ -274,6 +276,7 @@ export class ChainJudge implements Judge {
 					usage: attempt.usage,
 					stopReason: attempt.stopReason,
 					errorMessage: attempt.errorMessage,
+					credentialId: attempt.credentialId,
 				}),
 		});
 		return new TextJudge(backend);

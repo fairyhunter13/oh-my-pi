@@ -31,7 +31,7 @@ import { OAuthRefresher } from "./auth/refresh";
 import { ResetCredits } from "./auth/resets";
 import { RateLimits } from "./auth/rotation";
 import { CredentialSelector } from "./auth/select";
-import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+import { deserializeCredential, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 import type { AuthCredentialStore } from "./auth/store";
 import type {
 	AuthAccountPolicies,
@@ -308,6 +308,19 @@ export class AuthStorage {
 				}
 				return summarizeCredentialRow(row, marks);
 			});
+	}
+
+	/**
+	 * C-2: the full stored credential for `id`, enabled or disabled —
+	 * `listCredentials`/`listDisabled` return summaries with no secret to
+	 * fetch a live usage report with, and `credentials.list(provider)` only
+	 * covers the enabled in-memory pool. `undefined` when the store keeps no
+	 * catalog (a broker predating the endpoint) or no row has this id.
+	 */
+	credentialById(id: number): AuthCredential | undefined {
+		const row = this.#store.credentialCatalog?.get(id);
+		if (!row) return undefined;
+		return deserializeCredential(row) ?? undefined;
 	}
 
 	/** Store one more API key for `provider`; other rows stay. Returns the row id. */

@@ -115,6 +115,8 @@ export interface SessionModelUsageEntry {
 	usage: Usage;
 	stopReason?: StopReason;
 	errorMessage?: string;
+	/** D-1: stored credential row that served this call, when the response carried one. */
+	credentialId?: number;
 }
 
 /**

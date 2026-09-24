@@ -890,6 +890,11 @@ describe("resolveUsageCredential", () => {
 
 		const bad = resolveUsageCredential(storage, `anthropic/${id + 999}`);
 		expect(bad).toBe(`No stored credential matches "anthropic/${id + 999}".`);
+
+		// C-1: Number.parseInt("5abc", 10) reads 5, silently selecting the
+		// wrong row on a typo — reject anything after the digits.
+		const typo = resolveUsageCredential(storage, `anthropic/${id}abc`);
+		expect(typo).toBe(`"anthropic/${id}abc" is not "<provider>/<credential id>" or "<provider>/none".`);
 	});
 });
 

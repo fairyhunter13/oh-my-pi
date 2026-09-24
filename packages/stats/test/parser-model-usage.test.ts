@@ -56,6 +56,43 @@ describe("model usage session entries", () => {
 		});
 	});
 
+	it("D-1: a model_usage entry's own credentialId is attributed, not always unattributed", async () => {
+		const dir = path.join(getSessionsDir(), "--tmp--model-usage-credential-attributed");
+		await fs.mkdir(dir, { recursive: true });
+		const file = path.join(dir, "session.jsonl");
+		await Bun.write(
+			file,
+			`${JSON.stringify({
+				type: "model_usage",
+				id: "judge-1",
+				parentId: null,
+				timestamp: "2026-08-31T10:00:00.000Z",
+				purpose: "ttsr",
+				role: "judge",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-haiku-4-5",
+				stopReason: "stop",
+				credentialId: 5,
+				usage: {
+					input: 4,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 5,
+					cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+				},
+			})}\n`,
+		);
+
+		const result = await parseSessionFile(file);
+		await initDb();
+		expect(insertMessageStats(result.stats)).toBe(1);
+		const attributed: StatsCredential = { provider: "anthropic", credentialId: 5 };
+		expect(getRecentRequests(attributed, 1)[0]).toMatchObject({ entryId: "judge-1", credentialId: 5 });
+		expect(getRecentRequests(ANTHROPIC_CREDENTIAL, 1)[0]).toBeUndefined();
+	});
+
 	it("records the message's stored credential id, and null when the message carries none", async () => {
 		const dir = path.join(getSessionsDir(), "--tmp--model-usage-credential");
 		await fs.mkdir(dir, { recursive: true });

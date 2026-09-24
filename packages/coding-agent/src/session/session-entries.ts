@@ -89,6 +89,8 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/** D-1: stored credential row that served this call, when the response carried one. */
+	credentialId?: number;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

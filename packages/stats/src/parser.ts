@@ -317,6 +317,7 @@ function extractModelUsageStats(
 				stopReason: entry.stopReason ?? "stop",
 				errorMessage: entry.errorMessage,
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+				credentialId: entry.credentialId,
 			},
 		},
 		undefined,

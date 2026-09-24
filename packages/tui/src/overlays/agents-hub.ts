@@ -133,6 +133,8 @@ export interface GeneratedAgentSpec {
 	thinkingLevel?: string;
 	/** Frontmatter `model:`; one selector (a role alias, or `provider/model[:level]`). */
 	model?: string;
+	/** `mode: "copy"` only: the read-only source agent's file, whose unmanaged frontmatter keys (spawns, blocking, output, prewalk, advisor, read-summarize, autoload-skills, …) carry over to the copy. */
+	sourceFilePath?: string;
 }
 
 /** The one-agent form shared by create-review, copy, and in-place edit. */
@@ -142,6 +144,8 @@ interface AgentFormState {
 	scope: "project" | "user";
 	/** Set only for `mode: "edit"`: the file rewritten in place. */
 	filePath?: string;
+	/** Set only for `mode: "copy"`: the read-only source agent's file. */
+	sourceFilePath?: string;
 	/** Read-only display; also the frontmatter `name:` written back. */
 	name: string;
 	description: string;
@@ -765,14 +769,18 @@ export class AgentsHubComponent implements Component {
 		this.#tui.requestRender();
 	}
 
-	/** Read-only agent (bundled, plugin, or a repo's `.claude/agents`): copy it into an editable scope. */
+	/** Read-only agent (bundled, plugin, a repo's `.claude/agents`, or a ccw-generated user agent): copy it into an editable scope. */
 	#beginCopyFlow(agent: HubAgent): void {
 		this.#createError = null;
 		this.#createInput = null;
 		this.#createGenerating = false;
 		this.#form = {
 			mode: "copy",
-			scope: agent.origin === "user" ? "project" : "user",
+			// J-3: a project `.claude` agent is shadowed by a same-named user
+			// agent (project `.omp` wins over user, per discovery precedence),
+			// so its copy must default into the project scope, not user.
+			scope: agent.origin === "user" || agent.origin === "project-claude" ? "project" : "user",
+			sourceFilePath: agent.filePath,
 			name: agent.name,
 			description: agent.description,
 			tools: (agent.tools ?? []).join(", "),
@@ -907,6 +915,7 @@ export class AgentsHubComponent implements Component {
 				: undefined,
 			thinkingLevel: form.thinkingLevel.trim() || undefined,
 			model: form.model.trim() || undefined,
+			sourceFilePath: form.mode === "copy" ? form.sourceFilePath : undefined,
 		};
 		if (form.mode === "edit") {
 			if (!form.filePath) throw new Error("Missing file path for this agent.");
@@ -1037,7 +1046,11 @@ export class AgentsHubComponent implements Component {
 			if (agent) this.#toggleAgent(agent);
 			return;
 		}
-		if ((data === "e" || data === "E") && this.#searchQuery.length === 0) {
+		// J-5: base keys, not ctrl chords, would shadow every search that starts
+		// with e/d/c (e.g. typing "cri" for critical-task fires the c action on
+		// the first keystroke, before "ri" ever reaches the filter). Type-to-filter
+		// below handles the bare letters; only the chord form runs the action.
+		if (matchesKey(data, "ctrl+e")) {
 			const agent = this.#selectedAgent();
 			if (agent) {
 				if (agent.editable) this.#beginEditFlow(agent);
@@ -1045,17 +1058,17 @@ export class AgentsHubComponent implements Component {
 			}
 			return;
 		}
-		if ((data === "d" || data === "D") && this.#searchQuery.length === 0) {
+		if (matchesKey(data, "ctrl+d")) {
 			const agent = this.#selectedAgent();
 			if (agent) {
 				if (agent.editable) this.#openDeleteConfirm(agent);
 				else
-					this.#notice = `${agent.name} is read-only (${ORIGIN_LABEL[agent.origin]}) — press e to copy it first.`;
+					this.#notice = `${agent.name} is read-only (${ORIGIN_LABEL[agent.origin]}) — press ctrl+e to copy it first.`;
 			}
 			this.#tui.requestRender();
 			return;
 		}
-		if ((data === "c" || data === "C") && this.#searchQuery.length === 0) {
+		if (matchesKey(data, "ctrl+k")) {
 			const agent = this.#selectedAgent();
 			if (agent) this.#runAgentProfileMapping(agent.name);
 			return;
@@ -1585,7 +1598,7 @@ export class AgentsHubComponent implements Component {
 		if (this.#focus === "scope") {
 			return "↑/↓ scopes · →/Enter agents · Esc close";
 		}
-		return "Enter configure · Space enable/disable · e edit/copy · d delete · c map credential · ↑/↓ rows · type to search · Ctrl+R reload · Esc close";
+		return "Enter configure · Space enable/disable · Ctrl+E edit/copy · Ctrl+D delete · Ctrl+K map credential · ↑/↓ rows · type to search · Ctrl+R reload · Esc close";
 	}
 
 	#renderFooter(width: number): string {

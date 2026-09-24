@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentsHubDeps, GeneratedAgentSpec, HubAgentOrigin } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { isEnoent, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
@@ -53,8 +53,11 @@ function extractAssistantText(messages: AgentMessage[]): string | null {
 	return null;
 }
 
+/** Frontmatter keys the hub's form edits; every other key on an existing file rides through untouched. */
+const MANAGED_FRONTMATTER_KEYS = ["name", "description", "tools", "thinking-level", "model"] as const;
+
 /** Frontmatter object built from a form spec, kebab-cased where `parseAgentFields` expects it. */
-function buildAgentFrontmatter(spec: GeneratedAgentSpec): Record<string, unknown> {
+function buildManagedFrontmatter(spec: GeneratedAgentSpec): Record<string, unknown> {
 	const fields: Record<string, unknown> = { name: spec.identifier, description: spec.whenToUse };
 	if (spec.tools && spec.tools.length > 0) fields.tools = spec.tools;
 	if (spec.thinkingLevel) fields["thinking-level"] = spec.thinkingLevel;
@@ -62,9 +65,44 @@ function buildAgentFrontmatter(spec: GeneratedAgentSpec): Record<string, unknown
 	return fields;
 }
 
-function agentFileContent(spec: GeneratedAgentSpec): string {
-	const frontmatter = YAML.stringify(buildAgentFrontmatter(spec), null, 2).trimEnd();
-	return `---\n${frontmatter}\n---\n\n${spec.systemPrompt.trim()}\n`;
+/** Frontmatter of `filePath` as written on disk; `{}` when the file is missing or unreadable. */
+async function readAgentFrontmatter(filePath: string): Promise<Record<string, unknown>> {
+	try {
+		const raw = await fs.readFile(filePath, "utf-8");
+		// rawKeys: kebab-case (`thinking-level`, `autoload-skills`, a vendor
+		// key like `generated-by`) must ride through untouched, not get
+		// aliased to `thinkingLevel`/`autoloadSkills`/`generatedBy` — that
+		// alias would duplicate the key once the merged object is
+		// re-serialized, and would hide `generated-by` from the J-4 check.
+		return parseFrontmatter(raw, { source: filePath, rawKeys: true }).frontmatter;
+	} catch (error) {
+		if (isEnoent(error)) return {};
+		throw error;
+	}
+}
+
+/**
+ * J-1: an edit or a copy must not delete `spawns`, `blocking`, `output`,
+ * `prewalk`, `advisor`, `read-summarize`, `autoload-skills` or a vendor key
+ * like `generated-by` — only the hub's own form fields. `existing` is the
+ * source file's raw frontmatter (the file being rewritten in place for an
+ * edit, or the read-only agent being copied); `{}` for a brand-new agent.
+ * A managed key absent from `spec` (the form field was cleared) is deleted;
+ * present it overrides the existing value.
+ */
+function mergeFrontmatter(existing: Record<string, unknown>, spec: GeneratedAgentSpec): Record<string, unknown> {
+	const managed = buildManagedFrontmatter(spec);
+	const merged: Record<string, unknown> = { ...existing };
+	for (const key of MANAGED_FRONTMATTER_KEYS) {
+		if (key in managed) merged[key] = managed[key];
+		else delete merged[key];
+	}
+	return merged;
+}
+
+function agentFileContent(frontmatter: Record<string, unknown>, systemPrompt: string): string {
+	const yaml = YAML.stringify(frontmatter, null, 2).trimEnd();
+	return `---\n${yaml}\n---\n\n${systemPrompt.trim()}\n`;
 }
 
 /** The four agent roots the hub distinguishes: writable project/user `.omp`, and read-only everything else. */
@@ -130,20 +168,36 @@ export function createAgentsHubDeps(
 			const prewalkOverrides = cfgTaskAgentPrewalk.get(settings);
 			const advisorOverrides = cfgTaskAgentAdvisor.get(settings);
 			const roots = resolveAgentRoots(cwd);
-			return agents.map(agent => {
-				const override = overrides[agent.name];
-				const overrideModel = (Array.isArray(override) ? override.join(",") : (override ?? "")).trim();
-				const { origin, editable } = classifyAgentOrigin(agent.filePath, agent.source === "bundled", roots);
-				return {
-					...agent,
-					origin,
-					editable,
-					disabled: disabled.has(agent.name),
-					overrideModel: overrideModel || undefined,
-					prewalkOverride: prewalkOverrides[agent.name]?.trim() || undefined,
-					advisorOverride: advisorOverrides[agent.name]?.trim() || undefined,
-				};
-			});
+			return Promise.all(
+				agents.map(async agent => {
+					const override = overrides[agent.name];
+					const overrideModel = (Array.isArray(override) ? override.join(",") : (override ?? "")).trim();
+					const { origin, editable: classifiedEditable } = classifyAgentOrigin(
+						agent.filePath,
+						agent.source === "bundled",
+						roots,
+					);
+					// J-4: ccw writes `~/.omp/agent/agents/*.md` for its own
+					// generated agents (critical-task, planner, …), marked
+					// `generated-by: ccw`. An `e` save there survives until the
+					// next `ccw install --apply` reverts it with no warning, so
+					// treat it as read-only like a bundled/plugin agent.
+					let editable = classifiedEditable;
+					if (editable && agent.filePath) {
+						const frontmatter = await readAgentFrontmatter(agent.filePath);
+						if (frontmatter["generated-by"] === "ccw") editable = false;
+					}
+					return {
+						...agent,
+						origin,
+						editable,
+						disabled: disabled.has(agent.name),
+						overrideModel: overrideModel || undefined,
+						prewalkOverride: prewalkOverrides[agent.name]?.trim() || undefined,
+						advisorOverride: advisorOverrides[agent.name]?.trim() || undefined,
+					};
+				}),
+			);
 		},
 		getAvailableModels: () => modelRegistry.getAvailable(),
 		effectiveModelPatterns: agent =>
@@ -247,13 +301,19 @@ export function createAgentsHubDeps(
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}
-			await Bun.write(filePath, agentFileContent(spec));
+			// J-1: a copy of a read-only agent carries `sourceFilePath`, so its
+			// unmanaged frontmatter keys (spawns, blocking, output, prewalk,
+			// advisor, read-summarize, autoload-skills, a vendor key) land on
+			// the new file too, not just the 5 fields the form edits.
+			const existing = spec.sourceFilePath ? await readAgentFrontmatter(spec.sourceFilePath) : {};
+			await Bun.write(filePath, agentFileContent(mergeFrontmatter(existing, spec), spec.systemPrompt));
 			await refreshAgentDiscovery(cwd, extensionRoots());
 			return filePath;
 		},
 		updateAgent: async (filePath, spec) => {
 			assertWritableAgentPath(filePath, cwd);
-			await Bun.write(filePath, agentFileContent(spec));
+			const existing = await readAgentFrontmatter(filePath);
+			await Bun.write(filePath, agentFileContent(mergeFrontmatter(existing, spec), spec.systemPrompt));
 			await refreshAgentDiscovery(cwd, extensionRoots());
 		},
 		deleteAgent: async filePath => {

@@ -24,6 +24,12 @@ export function CredentialControl({ value, onChange, refreshTrigger, className =
 			.then(rows => {
 				if (cancelled) return;
 				setOptions(rows.map(row => ({ id: row.id, label: row.label })));
+				// D-2: "a picker step with exactly one choice is skipped, because
+				// there is nothing to ask" — the same rule the coding-agent
+				// pickers (`pickCredential`, `resolveUsageCredential`) already
+				// follow. Only fires while nothing is picked yet, so a user's
+				// explicit choice is never overridden by a later refresh.
+				if (value === null && rows.length === 1) onChange(rows[0].id);
 			})
 			.catch(() => {
 				if (!cancelled) setOptions([]);

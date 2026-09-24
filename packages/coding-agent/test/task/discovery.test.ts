@@ -212,6 +212,64 @@ describe("discoverAgents", () => {
 		expect(agents.map(agent => agent.name)).not.toContain("cc-test-agent");
 	});
 
+	test("I2-1: a HOME reached through a symlink still excludes ~/.claude/agents", async () => {
+		const realHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-agent-real-home-"));
+		const linkHome = path.join(tempHome, "linked-home");
+		await fs.symlink(realHome, linkHome);
+		const repoDir = path.join(realHome, "repo");
+		await fs.mkdir(repoDir, { recursive: true });
+		await fs.mkdir(path.join(realHome, ".claude", "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(realHome, ".claude", "agents", "cc-user-only.md"),
+			CLAUDE_AGENT_MD.replace("name: cc-test-agent", "name: cc-user-only"),
+		);
+
+		try {
+			// `repoDir` is already the real path (no symlink hop of its own), but
+			// `home` is passed through the symlink, matching the F2 repro where
+			// $HOME or one of cwd's ancestors is a symlink.
+			const { agents } = await discoverAgents(repoDir, linkHome);
+			expect(agents.map(agent => agent.name)).not.toContain("cc-user-only");
+		} finally {
+			await removeWithRetries(realHome);
+		}
+	});
+
+	test("G-1: a repo nested in another repo drops the outer repo's .claude/agents", async () => {
+		// outerRepo/.claude/agents plus outerRepo/innerRepo/.omp/agents: the
+		// nearest .omp dir is the inner repo's, and the nearest .claude dir is
+		// the outer repo's — two different repo roots. ccw's repoScope reads
+		// agents from one repo root only (the inner one, since it holds the
+		// nearest .omp/agents), so the outer .claude agents must not load here.
+		const outerRepo = path.join(tempHome, "outer-repo");
+		const innerRepo = path.join(outerRepo, "inner-repo");
+		await fs.mkdir(path.join(outerRepo, ".claude", "agents"), { recursive: true });
+		await fs.writeFile(path.join(outerRepo, ".claude", "agents", "outer-cc-agent.md"), CLAUDE_AGENT_MD);
+		await fs.mkdir(path.join(innerRepo, ".omp", "agents"), { recursive: true });
+		await fs.writeFile(path.join(innerRepo, ".omp", "agents", "inner-omp-agent.md"), OMP_AGENT_MD);
+
+		const { agents } = await discoverAgents(innerRepo, tempHome);
+		const names = agents.map(agent => agent.name);
+
+		expect(names).toContain("omp-test-agent");
+		expect(names).not.toContain("cc-test-agent");
+	});
+
+	test("G-1: a repo nested in another repo loads its own .claude/agents when it has no .omp/agents", async () => {
+		// Same nesting, but the inner repo has no .omp/agents of its own, so
+		// there is no repo root to reconcile against — the outer .claude/agents
+		// (the nearest one from cwd) loads as before.
+		const outerRepo = path.join(tempHome, "outer-repo");
+		const innerRepo = path.join(outerRepo, "inner-repo");
+		await fs.mkdir(path.join(outerRepo, ".claude", "agents"), { recursive: true });
+		await fs.writeFile(path.join(outerRepo, ".claude", "agents", "outer-cc-agent.md"), CLAUDE_AGENT_MD);
+		await fs.mkdir(innerRepo, { recursive: true });
+
+		const { agents } = await discoverAgents(innerRepo, tempHome);
+
+		expect(agents.map(agent => agent.name)).toContain("cc-test-agent");
+	});
+
 	test("loads agents from OMP npm plugins under <home>/.omp/plugins/node_modules", async () => {
 		await writeOmpPluginAgent(tempHome);
 

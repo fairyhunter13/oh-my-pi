@@ -293,7 +293,7 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 		expect(rendered).toContain("bundled");
 	});
 
-	test("e opens the edit form for an editable agent; Enter save calls updateAgent", async () => {
+	test("ctrl+e opens the edit form for an editable agent; Enter save calls updateAgent", async () => {
 		const settings = createSettings();
 		const calls: Array<{ filePath: string; description: string }> = [];
 		const { hub, strip } = await createHub(settings, {
@@ -301,7 +301,7 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 				calls.push({ filePath, description: spec.whenToUse });
 			},
 		});
-		hub.handleInput("e");
+		hub.handleInput("\x05"); // ctrl+e
 		expect(strip()).toContain("Edit agent");
 		expect(strip()).toContain("Name: dev");
 		hub.handleInput("\r"); // save with the unedited fields
@@ -310,7 +310,7 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 		]);
 	});
 
-	test("e on a read-only (bundled) agent opens the copy form instead; Enter save calls saveAgent", async () => {
+	test("ctrl+e on a read-only (bundled) agent opens the copy form instead; Enter save calls saveAgent", async () => {
 		const settings = createSettings();
 		const calls: string[] = [];
 		const { hub, strip } = await createHub(settings, {
@@ -320,13 +320,13 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 			},
 		});
 		hub.handleInput("\x1b[B"); // dev → scout
-		hub.handleInput("e");
+		hub.handleInput("\x05"); // ctrl+e
 		expect(strip()).toContain("Copy agent");
 		hub.handleInput("\r"); // save the copy
 		expect(calls).toEqual(["user/scout"]);
 	});
 
-	test("d opens a delete confirmation for an editable agent; confirming calls deleteAgent", async () => {
+	test("ctrl+d opens a delete confirmation for an editable agent; confirming calls deleteAgent", async () => {
 		const settings = createSettings();
 		const calls: string[] = [];
 		const { hub, strip } = await createHub(settings, {
@@ -334,7 +334,7 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 				calls.push(filePath);
 			},
 		});
-		hub.handleInput("d");
+		hub.handleInput("\x04"); // ctrl+d
 		expect(strip()).toContain("Keep it");
 		expect(strip()).toContain("Delete dev");
 		hub.handleInput("\x1b[C"); // Keep it → Delete dev
@@ -342,15 +342,15 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 		expect(calls).toEqual(["/tmp/agents-hub-test/.omp/agents/dev.md"]);
 	});
 
-	test("d on a read-only (bundled) agent shows a notice instead of deleting", async () => {
+	test("ctrl+d on a read-only (bundled) agent shows a notice instead of deleting", async () => {
 		const settings = createSettings();
 		const { hub, strip } = await createHub(settings);
 		hub.handleInput("\x1b[B"); // dev → scout
-		hub.handleInput("d");
+		hub.handleInput("\x04"); // ctrl+d
 		expect(strip()).toContain("read-only");
 	});
 
-	test("c hands the mapping off to /agent-profile set <name> when the command is registered", async () => {
+	test("ctrl+k hands the mapping off to /agent-profile set <name> when the command is registered", async () => {
 		const settings = createSettings();
 		const calls: string[] = [];
 		const { hub, strip } = await createHub(settings, {
@@ -359,16 +359,53 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 				calls.push(name);
 			},
 		});
-		hub.handleInput("c");
+		hub.handleInput("\x0b"); // ctrl+k
 		expect(calls).toEqual(["dev"]);
 		expect(strip()).toContain("/agent-profile set dev");
 	});
 
-	test("c names the command to run by hand when /agent-profile is not registered", async () => {
+	test("ctrl+k names the command to run by hand when /agent-profile is not registered", async () => {
 		const settings = createSettings();
 		const { hub, strip } = await createHub(settings);
-		hub.handleInput("c");
+		hub.handleInput("\x0b"); // ctrl+k
 		expect(strip()).toContain("Map it with /agent-profile set dev");
+	});
+
+	test("J-5: typing e, d or c on an empty query filters the list instead of firing the ctrl+e/d/k action", async () => {
+		const settings = createSettings();
+		const { hub, strip } = await createHub(settings, {
+			loadAgents: async () => [
+				{
+					name: "critical-task",
+					description: "Critical work agent",
+					systemPrompt: "",
+					source: "user",
+					filePath: "/tmp/agents-hub-test/agents/critical-task.md",
+					origin: "user",
+					editable: true,
+					disabled: false,
+				},
+				{
+					name: "dev",
+					description: "Development agent",
+					systemPrompt: "",
+					source: "project",
+					filePath: "/tmp/agents-hub-test/.omp/agents/dev.md",
+					origin: "project-omp",
+					editable: true,
+					disabled: false,
+				},
+			],
+		});
+		hub.handleInput("c");
+		hub.handleInput("r");
+		hub.handleInput("i");
+		const rendered = strip();
+		expect(rendered).toContain("critical-task");
+		expect(rendered).not.toContain("dev");
+		expect(rendered).not.toContain("Edit agent");
+		expect(rendered).not.toContain("Delete");
+		expect(rendered).not.toContain("/agent-profile set");
 	});
 
 	test("the model property strip maps via /agent-profile instead of picking, when the command is registered", async () => {

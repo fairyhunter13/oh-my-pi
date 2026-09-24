@@ -961,8 +961,8 @@ export function resolveUsageCredential(
 			}
 			return { provider: argProvider, credentialId: null };
 		}
-		const id = Number.parseInt(idPart, 10);
-		if (!Number.isInteger(id)) return `"${arg}" is not "<provider>/<credential id>" or "<provider>/none".`;
+		if (!/^\d+$/.test(idPart)) return `"${arg}" is not "<provider>/<credential id>" or "<provider>/none".`;
+		const id = Number(idPart);
 		const row = authStorage.listCredentials(argProvider).find(entry => entry.id === id);
 		if (!row) return `No stored credential matches "${arg}".`;
 		return { provider: argProvider, row };
@@ -1162,10 +1162,15 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				process.exitCode = 1;
 				return;
 			}
-			const stored = authStorage.credentials.list(target.provider).find(entry => entry.id === target.row.id);
+			// C-2: `credentials.list` only covers the enabled in-memory pool, so
+			// a disabled row's history was silently hidden — fall back to the
+			// catalog, which keeps a disabled row's data until it is removed.
+			const stored =
+				authStorage.credentials.list(target.provider).find(entry => entry.id === target.row.id)?.credential ??
+				authStorage.credentialById(target.row.id);
 			// F6: match by the full usageCacheIdentity, not by email/accountId
 			// separately — two org rows sharing one email must not both match.
-			const accountKey = stored ? usageCacheIdentity(buildUsageCredential(stored.credential)) : undefined;
+			const accountKey = stored ? usageCacheIdentity(buildUsageCredential(stored)) : undefined;
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
@@ -1203,8 +1208,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			process.exitCode = 2;
 			return;
 		}
-		const stored = authStorage.credentials.list(target.provider).find(entry => entry.id === target.row.id);
-		if (!stored) {
+		// C-2: `credentials.list` only covers the enabled in-memory pool. A
+		// disabled row named with --credential is still stored — fall back to
+		// the catalog so its tombstone shows instead of a false "no match".
+		const credential =
+			authStorage.credentials.list(target.provider).find(entry => entry.id === target.row.id)?.credential ??
+			authStorage.credentialById(target.row.id);
+		if (!credential) {
 			process.stderr.write(chalk.yellow(`No stored credential matches "${target.provider}/${target.row.id}".\n`));
 			process.exitCode = 1;
 			return;
@@ -1214,7 +1224,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = new ModelRegistry(authStorage);
-		const thatAccount = credentialToAccountIdentity(target.provider, stored.credential);
+		const thatAccount = credentialToAccountIdentity(target.provider, credential);
 		// Reports are always fresh (broker-side fetch); the credential row can
 		// come from a disk-cached snapshot up to an hour old — revalidate so a
 		// just-logged-in (or just-rotated-identity) row isn't rendered stale.
@@ -1226,7 +1236,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 		let report: UsageReport | null;
 		try {
-			report = await authStorage.usage.report(target.provider, stored.credential, {
+			report = await authStorage.usage.report(target.provider, credential, {
 				baseUrl: modelRegistry.getProviderBaseUrl(target.provider),
 				signal: AbortSignal.timeout(15_000),
 			});
