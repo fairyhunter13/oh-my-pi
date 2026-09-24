@@ -1,14 +1,15 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import { AuthStorage, SqliteAuthCredentialStore, type UsageReport } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
-	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	resolveUsageCredential,
 	type UsageAccountIdentity,
 	type UsagePolicyDiagnosticsOptions,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
@@ -81,216 +82,6 @@ describe("buildRedactionMap", () => {
 		const map = buildRedactionMap(["user@example.test", "user@example.test"]);
 		expect(map.size).toBe(1);
 		expect(map.get("user@example.test")).toBe("us*");
-	});
-});
-
-describe("computeProviderWindowStats", () => {
-	it("buckets by window duration, binds each account to its worst limit, and reports remaining capacity", () => {
-		const reports = [
-			makeReport("anthropic", "account-a@example.test", [
-				makeLimit({ id: "5h", usedFraction: 0.9, durationMs: FIVE_HOURS, windowId: "5h" }),
-				makeLimit({ id: "7d", usedFraction: 0.1, durationMs: SEVEN_DAYS, windowId: "7d" }),
-				// A model-scoped cap on the same window holds its own pool: it must not be read as
-				// the umbrella window's burn, and the umbrella must not hide it either.
-				makeLimit({ id: "7d-opus", usedFraction: 0.4, durationMs: SEVEN_DAYS, windowId: "7d", tier: "opus" }),
-			]),
-			makeReport("anthropic", "account-b@example.test", [
-				makeLimit({ id: "5h", usedFraction: 0.4, durationMs: FIVE_HOURS, windowId: "5h" }),
-				makeLimit({ id: "7d", usedFraction: 0.2, durationMs: SEVEN_DAYS, windowId: "7d" }),
-			]),
-		];
-		const stats = computeProviderWindowStats(reports);
-		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([
-			["5h", undefined],
-			["7d", undefined],
-			["7d", "opus"],
-		]);
-		const [fiveHour, sevenDay, scoped] = stats;
-		// Sorted shortest window first, then by meter.
-		expect(fiveHour.accounts).toBe(2);
-		expect(fiveHour.usedAccounts).toBeCloseTo(1.3);
-		expect(fiveHour.remainingAccounts).toBeCloseTo(0.7);
-		expect(sevenDay.accounts).toBe(2);
-		expect(sevenDay.usedAccounts).toBeCloseTo(0.3);
-		expect(sevenDay.remainingAccounts).toBeCloseTo(1.7);
-		expect(scoped.accounts).toBe(1);
-		expect(scoped.usedAccounts).toBeCloseTo(0.4);
-		expect(scoped.remainingAccounts).toBeCloseTo(0.6);
-	});
-
-	it("keeps a spent model-scoped cap visible next to the shared window it caps", () => {
-		// Anthropic reports the umbrella weekly window as shared and the Fable cap as a tier with
-		// no shared flag, so a spent Fable cap must not read as a partly-spent weekly window.
-		const report = makeReport("anthropic", "scoped@example.test", [
-			makeLimit({ id: "anthropic:7d", usedFraction: 0.51, durationMs: SEVEN_DAYS, windowId: "7d", shared: true }),
-			makeLimit({
-				id: "anthropic:7d:fable",
-				usedFraction: 1,
-				durationMs: SEVEN_DAYS,
-				windowId: "7d",
-				tier: "fable",
-			}),
-		]);
-		const stats = computeProviderWindowStats([report]);
-		expect(stats.map(stat => [stat.window, stat.meter, stat.usedAccounts, stat.remainingAccounts])).toEqual([
-			["7d", undefined, 0.51, 0.49],
-			["7d", "fable", 1, 0],
-		]);
-
-		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
-		expect(text).toContain("7d → 0.51/1");
-		expect(text).toContain("7d (Fable) → 1.00/1");
-	});
-
-	it("does not meter routing copies of one shared upstream pool", () => {
-		// Antigravity reports one third-party pool once per model family; the shared group keeps
-		// them one pool with the worst fraction binding, not one meter per copy.
-		const report = makeReport("google-antigravity", "shared@example.test", [
-			makeLimit({
-				id: "google-antigravity:anthropic:default:5h",
-				label: "Claude & GPT (shared)",
-				provider: "google-antigravity",
-				usedFraction: 0.4,
-				durationMs: FIVE_HOURS,
-				windowId: "5h",
-				sharedGroup: "third-party:5h",
-			}),
-			makeLimit({
-				id: "google-antigravity:openai:default:5h",
-				label: "Claude & GPT (shared)",
-				provider: "google-antigravity",
-				usedFraction: 0.7,
-				durationMs: FIVE_HOURS,
-				windowId: "5h",
-				sharedGroup: "third-party:5h",
-			}),
-		]);
-		const stats = computeProviderWindowStats([report]);
-		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([["5h", undefined]]);
-		expect(stats[0].accounts).toBe(1);
-		expect(stats[0].usedAccounts).toBeCloseTo(0.7);
-		expect(stats[0].remainingAccounts).toBeCloseTo(0.3);
-	});
-
-	it("does not split one window by subscription plan", () => {
-		// Copilot, Devin, and Muse Code carry the plan name in `scope.tier`; accounts on different
-		// plans still burn the same window, so they stay one capacity bucket.
-		const monthly = 30 * 24 * HOUR;
-		const reports = [
-			makeReport("github-copilot", "individual@example.test", [
-				makeLimit({
-					id: "copilot:premium",
-					provider: "github-copilot",
-					tier: "individual",
-					usedFraction: 0.3,
-					durationMs: monthly,
-					windowId: "monthly",
-				}),
-			]),
-			makeReport("github-copilot", "business@example.test", [
-				makeLimit({
-					id: "copilot:premium",
-					provider: "github-copilot",
-					tier: "business",
-					usedFraction: 0.5,
-					durationMs: monthly,
-					windowId: "monthly",
-				}),
-			]),
-		];
-		const stats = computeProviderWindowStats(reports);
-		expect(stats.map(stat => [stat.window, stat.meter, stat.accounts])).toEqual([["30d", undefined, 2]]);
-		expect(stats[0].usedAccounts).toBeCloseTo(0.8);
-		expect(stats[0].remainingAccounts).toBeCloseTo(1.2);
-	});
-
-	it("reports Spark-only capacity instead of dropping the meter", () => {
-		const report = makeReport("openai-codex", "spark@example.test", [
-			makeLimit({
-				id: "openai-codex:spark:primary",
-				provider: "openai-codex",
-				tier: "spark",
-				usedFraction: 0.75,
-				durationMs: FIVE_HOURS,
-				windowId: "5h",
-			}),
-			makeLimit({
-				id: "openai-codex:spark:secondary",
-				provider: "openai-codex",
-				tier: "spark",
-				usedFraction: 0.25,
-				durationMs: SEVEN_DAYS,
-				windowId: "7d",
-			}),
-		]);
-		const stats = computeProviderWindowStats([report]);
-		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([
-			["5h", "spark"],
-			["7d", "spark"],
-		]);
-		expect(stats[0]).toMatchObject({ accounts: 1, usedAccounts: 0.75, remainingAccounts: 0.25 });
-	});
-
-	it("keeps mixed Codex meters separate when they share a window duration", () => {
-		const report = makeReport("openai-codex", "mixed@example.test", [
-			makeLimit({
-				id: "openai-codex:primary",
-				provider: "openai-codex",
-				usedFraction: 0.2,
-				durationMs: FIVE_HOURS,
-				windowId: "5h",
-			}),
-			makeLimit({
-				id: "openai-codex:secondary",
-				provider: "openai-codex",
-				usedFraction: 0.4,
-				durationMs: SEVEN_DAYS,
-				windowId: "7d",
-			}),
-			makeLimit({
-				id: "openai-codex:spark:primary",
-				provider: "openai-codex",
-				tier: "spark",
-				usedFraction: 0.8,
-				durationMs: FIVE_HOURS,
-				windowId: "5h",
-			}),
-			makeLimit({
-				id: "openai-codex:spark:secondary",
-				provider: "openai-codex",
-				tier: "spark",
-				usedFraction: 0.1,
-				durationMs: SEVEN_DAYS,
-				windowId: "7d",
-			}),
-		]);
-		const stats = computeProviderWindowStats([report]);
-		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([
-			["5h", "chat"],
-			["5h", "spark"],
-			["7d", "chat"],
-			["7d", "spark"],
-		]);
-		expect(stats.find(stat => stat.window === "5h" && stat.meter === "chat")?.usedAccounts).toBe(0.2);
-		expect(stats.find(stat => stat.window === "5h" && stat.meter === "spark")?.usedAccounts).toBe(0.8);
-
-		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
-		expect(text).toContain("5h (Chat) → 0.20/1");
-		expect(text).toContain("5h (Spark) → 0.80/1");
-	});
-
-	it("ignores limits without a resolvable fraction", () => {
-		const reports = [
-			makeReport("anthropic", "account-a@example.test", [
-				{
-					id: "mystery",
-					label: "mystery",
-					scope: { provider: "anthropic" },
-					amount: { unit: "unknown" },
-				},
-			]),
-		];
-		expect(computeProviderWindowStats(reports)).toHaveLength(0);
 	});
 });
 
@@ -438,7 +229,6 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("84.0% used");
 		expect(text).toContain("Cerebras");
 		expect(text).toContain("API key — no usage data");
-		expect(text).toContain("capacity: 5h → 1.34/2 accounts used (0.66× quota left)");
 		expect(text).not.toContain("policy:");
 	});
 
@@ -613,20 +403,6 @@ describe("formatUsageBreakdown", () => {
 		expect(text.match(/Gemini/g)).toHaveLength(2);
 		expect(text).not.toContain("Usage (Anthropic)");
 		expect(text).not.toContain("Usage (OpenAI)");
-	});
-
-	it("keeps near-exhausted capacity fractional instead of rounding it to an exact need", () => {
-		const nearReports = [
-			makeReport("anthropic", "near-a@example.test", [
-				makeLimit({ id: "Claude 5 Hour", usedFraction: 1, durationMs: FIVE_HOURS, windowId: "5h" }),
-			]),
-			makeReport("anthropic", "near-b@example.test", [
-				makeLimit({ id: "Claude 5 Hour", usedFraction: 0.99, durationMs: FIVE_HOURS, windowId: "5h" }),
-			]),
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown(nearReports, [], Date.now()));
-		expect(text).toContain("capacity: 5h → 1.99/2 accounts used (0.01× quota left)");
-		expect(text).not.toContain("need:");
 	});
 
 	it("marks sibling provider limits that an account did not report", () => {
@@ -827,7 +603,6 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("Google Antigravity");
 		expect(text).toContain("Usage (Google) (Weekly)");
 		expect(text).toContain("60.0% used");
-		expect(text).toContain("0.40× quota left");
 	});
 
 	it("renders Cursor request quotas in the usage breakdown", () => {
@@ -1045,5 +820,73 @@ describe("usage command configuration", () => {
 		expect(error).toBe("");
 		expect(exitCode).toBe(0);
 		expect(output).toBe("Invalidated cached usage reports for all providers.\n");
+	});
+});
+
+describe("resolveUsageCredential", () => {
+	async function makeStorage(): Promise<AuthStorage> {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store);
+		await storage.credentials.reload();
+		return storage;
+	}
+
+	it("picks the sole candidate when --credential is omitted", async () => {
+		const storage = await makeStorage();
+		await storage.credentials.upsert("anthropic", {
+			type: "oauth",
+			access: "access-a",
+			refresh: "refresh-a",
+			expires: Date.now() + 60_000,
+			email: "a@example.test",
+		});
+		await storage.credentials.reload();
+		const target = resolveUsageCredential(storage, undefined);
+		if (typeof target === "string") throw new Error(`expected a resolved credential, got: ${target}`);
+		expect(target.provider).toBe("anthropic");
+		expect(target.row.identity).toBe("a@example.test");
+	});
+
+	it("lists candidates and lets the caller exit 2 with two candidates", async () => {
+		const storage = await makeStorage();
+		await storage.credentials.upsert("anthropic", {
+			type: "oauth",
+			access: "access-a",
+			refresh: "refresh-a",
+			expires: Date.now() + 60_000,
+			email: "a@example.test",
+		});
+		await storage.credentials.upsert("anthropic", {
+			type: "oauth",
+			access: "access-b",
+			refresh: "refresh-b",
+			expires: Date.now() + 60_000,
+			email: "b@example.test",
+		});
+		await storage.credentials.reload();
+		const target = resolveUsageCredential(storage, undefined);
+		expect(typeof target).toBe("string");
+		expect(target as string).toContain("Pick a credential with --credential <provider>/<id>:");
+		expect(target as string).toContain("anthropic/");
+	});
+
+	it("accepts <provider>/<id> and rejects an unknown id", async () => {
+		const storage = await makeStorage();
+		await storage.credentials.upsert("anthropic", {
+			type: "oauth",
+			access: "access-a",
+			refresh: "refresh-a",
+			expires: Date.now() + 60_000,
+			email: "a@example.test",
+		});
+		await storage.credentials.reload();
+		const id = storage.listCredentials("anthropic")[0]!.id;
+
+		const ok = resolveUsageCredential(storage, `anthropic/${id}`);
+		if (typeof ok === "string") throw new Error(`expected a resolved credential, got: ${ok}`);
+		expect(ok.row.identity).toBe("a@example.test");
+
+		const bad = resolveUsageCredential(storage, `anthropic/${id + 999}`);
+		expect(bad).toBe(`No stored credential matches "anthropic/${id + 999}".`);
 	});
 });

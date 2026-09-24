@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
+	CredentialSummary,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
 	ResetCreditTarget,
@@ -70,6 +71,15 @@ interface FakeAcpBuiltinSession {
 	modelRegistry: {
 		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
+		getProviderBaseUrl(provider: string): string | undefined;
+		authStorage: {
+			listCredentials(provider?: string, sessionId?: string): CredentialSummary[];
+			credentials: { list(provider?: string): Array<{ id: number; provider: string; credential: unknown }> };
+			usage: {
+				providerFor(provider: string): unknown;
+				report(provider: string, credential: unknown, options?: unknown): Promise<UsageReport | null>;
+			};
+		};
 	};
 	setModel(model: unknown): Promise<void>;
 	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
@@ -168,6 +178,18 @@ function createRuntime() {
 		modelRegistry: {
 			getAll: () => session.getAvailableModels(),
 			getAvailable: () => session.getAvailableModels(),
+			getProviderBaseUrl: (_provider: string) => undefined,
+			authStorage: {
+				listCredentials: (_provider?: string, _sessionId?: string) => [] as CredentialSummary[],
+				credentials: {
+					list: (_provider?: string) => [] as Array<{ id: number; provider: string; credential: unknown }>,
+				},
+				usage: {
+					providerFor: (_provider: string) => undefined as unknown,
+					report: async (_provider: string, _credential: unknown, _options?: unknown) =>
+						null as UsageReport | null,
+				},
+			},
 		},
 		async setModel(_model: unknown) {},
 		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {},
@@ -257,6 +279,34 @@ function createRuntime() {
 	};
 }
 
+/** Store one credential with one usage report, so `/usage`/`/usage show` finds a real target. */
+function stubUsageCredential(
+	runtime: { session: FakeAcpBuiltinSession },
+	options: { provider: string; id: number; report: UsageReport },
+): void {
+	const row: CredentialSummary = {
+		id: options.id,
+		provider: options.provider,
+		kind: "oauth",
+		label: null,
+		identity: null,
+		org: null,
+		hint: null,
+		disabled: null,
+		isDefault: false,
+		active: true,
+		pinned: false,
+	};
+	runtime.session.fetchUsageReports = async () => [options.report];
+	const authStorage = runtime.session.modelRegistry.authStorage;
+	authStorage.listCredentials = () => [row];
+	authStorage.credentials.list = () => [
+		{ id: row.id, provider: row.provider, credential: { type: "api_key", key: "x" } },
+	];
+	authStorage.usage.providerFor = () => ({});
+	authStorage.usage.report = async () => options.report;
+}
+
 describe("ACP builtin slash commands", () => {
 	it("consumes fast status without returning prompt text", async () => {
 		const { output, runtime } = createRuntime();
@@ -295,10 +345,12 @@ describe("ACP builtin slash commands", () => {
 		expect(output).toEqual(["Next turn forced to use read."]);
 	});
 
-	it("renders provider usage reports when the session can fetch them", async () => {
+	it("renders one credential's usage report when shown by target", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.session.fetchUsageReports = async () => [
-			{
+		stubUsageCredential(runtime, {
+			provider: "openai-codex",
+			id: 1,
+			report: {
 				provider: "openai-codex",
 				fetchedAt: Date.now(),
 				limits: [
@@ -312,9 +364,9 @@ describe("ACP builtin slash commands", () => {
 				],
 				metadata: { email: "user@example.com" },
 			},
-		];
+		});
 
-		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/usage show openai-codex/1", runtime);
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Openai Codex");
@@ -325,8 +377,10 @@ describe("ACP builtin slash commands", () => {
 
 	it("suppresses redundant usage window suffixes while retaining legitimate ones", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.session.fetchUsageReports = async () => [
-			{
+		stubUsageCredential(runtime, {
+			provider: "anthropic",
+			id: 1,
+			report: {
 				provider: "anthropic",
 				fetchedAt: Date.now(),
 				limits: [
@@ -346,9 +400,9 @@ describe("ACP builtin slash commands", () => {
 				],
 				metadata: { email: "user@example.com" },
 			},
-		];
+		});
 
-		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/usage show anthropic/1", runtime);
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Claude Extra Usage");
@@ -356,30 +410,29 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("123.45 usd used");
 		expect(output[0]).toContain("Daily quota — 24 hours");
 	});
+
 	it("/usage show renders the same report as plain /usage", async () => {
 		const now = 1_700_000_000_000;
 		const nowSpy = spyOn(Date, "now").mockReturnValue(now);
 		try {
-			const reports: UsageReport[] = [
-				{
-					provider: "openai-codex",
-					fetchedAt: now - 5_000,
-					limits: [
-						{
-							id: "codex-5h",
-							label: "5 hours",
-							scope: { provider: "openai-codex", tier: "prolite", accountId: "account-1" },
-							window: { id: "5h", label: "5 hours", resetsAt: now + 60 * 60 * 1000 },
-							amount: { used: 0.24, usedFraction: 0.24, unit: "unknown" },
-						},
-					],
-					metadata: { email: "user@example.com" },
-				},
-			];
+			const report: UsageReport = {
+				provider: "openai-codex",
+				fetchedAt: now - 5_000,
+				limits: [
+					{
+						id: "codex-5h",
+						label: "5 hours",
+						scope: { provider: "openai-codex", tier: "prolite", accountId: "account-1" },
+						window: { id: "5h", label: "5 hours", resetsAt: now + 60 * 60 * 1000 },
+						amount: { used: 0.24, usedFraction: 0.24, unit: "unknown" },
+					},
+				],
+				metadata: { email: "user@example.com" },
+			};
 			const plain = createRuntime();
 			const show = createRuntime();
-			plain.runtime.session.fetchUsageReports = async () => reports;
-			show.runtime.session.fetchUsageReports = async () => reports;
+			stubUsageCredential(plain.runtime, { provider: "openai-codex", id: 1, report });
+			stubUsageCredential(show.runtime, { provider: "openai-codex", id: 1, report });
 
 			const plainResult = await executeAcpBuiltinSlashCommand("/usage", plain.runtime);
 			const showResult = await executeAcpBuiltinSlashCommand("/usage show", show.runtime);
@@ -1449,8 +1502,10 @@ describe("wave 5 — adapters and polish", () => {
 	// /usage bar character
 	it("/usage: includes bar character when usedFraction is 0.5", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.session.fetchUsageReports = async () => [
-			{
+		stubUsageCredential(runtime, {
+			provider: "test-provider",
+			id: 1,
+			report: {
 				provider: "test-provider",
 				fetchedAt: Date.now(),
 				limits: [
@@ -1464,8 +1519,8 @@ describe("wave 5 — adapters and polish", () => {
 				],
 				metadata: {},
 			},
-		];
-		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+		});
+		const result = await executeAcpBuiltinSlashCommand("/usage show test-provider/1", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("█");
 	});

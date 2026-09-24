@@ -5,8 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, getFileOffset, getOverallStats, getRecentRequests, initDb } from "@oh-my-pi/omp-stats/db";
+import type { StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
+
+const OPENAI_CREDENTIAL: StatsCredential = { provider: "openai", credentialId: null };
 
 const isolation = installStatsTestIsolation("@pi-stats-tail-");
 
@@ -123,7 +126,7 @@ describe("incremental stats ingestion", () => {
 		await Bun.write(`${file}.replacement`, assistant("new"));
 		await fs.rename(`${file}.replacement`, file);
 		await syncAllSessions({ workers: 1 });
-		expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
+		expect(getRecentRequests(OPENAI_CREDENTIAL).map(row => row.entryId)).toEqual(["new"]);
 	});
 
 	it("detects a second replacement after interruption without forgetting its previous file identity", async () => {
@@ -147,7 +150,7 @@ describe("incremental stats ingestion", () => {
 		);
 		await syncAllSessions({ workers: 2 });
 		expect(
-			getRecentRequests()
+			getRecentRequests(OPENAI_CREDENTIAL)
 				.map(row => row.entryId)
 				.sort(),
 		).toEqual(["newA", "newB"]);
@@ -165,7 +168,7 @@ describe("incremental stats ingestion", () => {
 				assistant("new") + JSON.stringify({ type: "custom", padding: "x".repeat(8192) }) + "\n",
 			);
 			await syncAllSessions({ workers: 1 });
-			expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
+			expect(getRecentRequests(OPENAI_CREDENTIAL).map(row => row.entryId)).toEqual(["new"]);
 		});
 	}
 
@@ -193,8 +196,8 @@ describe("incremental stats ingestion", () => {
 		} finally {
 			observer.mockRestore();
 		}
-		expect(getOverallStats().totalRequests).toBe(2);
-		expect(getOverallStats().totalPremiumRequests).toBe(2);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalRequests).toBe(2);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalPremiumRequests).toBe(2);
 		expect(readBytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
 	});
 
@@ -212,8 +215,8 @@ describe("incremental stats ingestion", () => {
 				await fs.writeFile(file, replacement);
 			}
 			await syncAllSessions({ workers: 1 });
-			expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
-			expect(getOverallStats().totalPremiumRequests).toBe(0);
+			expect(getRecentRequests(OPENAI_CREDENTIAL).map(row => row.entryId)).toEqual(["new"]);
+			expect(getOverallStats(OPENAI_CREDENTIAL).totalPremiumRequests).toBe(0);
 		});
 	}
 
@@ -229,8 +232,8 @@ describe("incremental stats ingestion", () => {
 		await syncAllSessions({ workers: 1 });
 		await fs.appendFile(file, assistant("second"));
 		await syncAllSessions({ workers: 1 });
-		expect(getOverallStats().totalRequests).toBe(2);
-		expect(getOverallStats().totalPremiumRequests).toBe(2);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalRequests).toBe(2);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalPremiumRequests).toBe(2);
 	});
 
 	it("carries service-tier resets through the worker protocol and database restarts", async () => {
@@ -242,8 +245,8 @@ describe("incremental stats ingestion", () => {
 		closeDb();
 		await fs.appendFile(file, assistant("third"));
 		await syncAllSessions({ workers: 2 });
-		expect(getOverallStats().totalRequests).toBe(3);
-		expect(getOverallStats().totalPremiumRequests).toBe(2);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalRequests).toBe(3);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalPremiumRequests).toBe(2);
 	}, 15_000);
 
 	it("retries an incomplete final entry without losing its preceding service tier", async () => {
@@ -251,11 +254,11 @@ describe("incremental stats ingestion", () => {
 		const split = Math.floor(reply.length / 2);
 		const file = await session(tier("priority") + reply.slice(0, split));
 		await syncAllSessions({ workers: 1 });
-		expect(getOverallStats().totalRequests).toBe(0);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalRequests).toBe(0);
 		await fs.appendFile(file, reply.slice(split));
 		await syncAllSessions({ workers: 1 });
-		expect(getOverallStats().totalRequests).toBe(1);
-		expect(getOverallStats().totalPremiumRequests).toBe(1);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalRequests).toBe(1);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalPremiumRequests).toBe(1);
 	});
 
 	it("detects a same-inode rewrite that grows past the previous cursor", async () => {
@@ -263,8 +266,8 @@ describe("incremental stats ingestion", () => {
 		await syncAllSessions({ workers: 1 });
 		await fs.writeFile(file, assistant("new") + JSON.stringify({ type: "custom", padding: "x".repeat(8192) }) + "\n");
 		await syncAllSessions({ workers: 1 });
-		expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
-		expect(getOverallStats().totalPremiumRequests).toBe(0);
+		expect(getRecentRequests(OPENAI_CREDENTIAL).map(row => row.entryId)).toEqual(["new"]);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalPremiumRequests).toBe(0);
 	});
 
 	it("rolls back replacement deletions and the cursor when a derived-row write fails", async () => {
@@ -277,11 +280,11 @@ describe("incremental stats ingestion", () => {
 		);
 		await fs.writeFile(file, assistant("new"));
 		await expect(syncAllSessions({ workers: 1 })).rejects.toThrow("injected write failure");
-		expect(getRecentRequests().map(row => row.entryId)).toEqual(["old"]);
+		expect(getRecentRequests(OPENAI_CREDENTIAL).map(row => row.entryId)).toEqual(["old"]);
 		expect(getFileOffset(file)).toEqual(oldOffset);
 		db.exec("DROP TRIGGER reject_new");
 		await syncAllSessions({ workers: 1 });
-		expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
+		expect(getRecentRequests(OPENAI_CREDENTIAL).map(row => row.entryId)).toEqual(["new"]);
 	});
 
 	it("keeps a request still present in a fork when its original transcript is replaced", async () => {
@@ -289,11 +292,11 @@ describe("incremental stats ingestion", () => {
 		await syncAllSessions({ workers: 1 });
 		await Bun.write(path.join(path.dirname(file), "fork.jsonl"), assistant("shared"));
 		await syncAllSessions({ workers: 1 });
-		expect(getOverallStats().totalRequests).toBe(1);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalRequests).toBe(1);
 		await fs.writeFile(file, assistant("new"));
 		await syncAllSessions({ workers: 1 });
 		expect(
-			getRecentRequests()
+			getRecentRequests(OPENAI_CREDENTIAL)
 				.map(row => row.entryId)
 				.sort(),
 		).toEqual(["new", "shared"]);
@@ -316,7 +319,7 @@ describe("incremental stats ingestion", () => {
 		closeDb();
 		await syncAllSessions({ workers: 1 });
 		expect(
-			getRecentRequests()
+			getRecentRequests(OPENAI_CREDENTIAL)
 				.map(row => row.entryId)
 				.sort(),
 		).toEqual(["new", "shared"]);

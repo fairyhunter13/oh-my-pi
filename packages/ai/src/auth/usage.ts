@@ -450,9 +450,9 @@ export class UsageService implements UsageApi {
 		return true;
 	}
 
-	/** Broker host: aggregate recorded per-client usage since `sinceMs`. */
-	clientSummary(sinceMs: number): ClientUsageSummary {
-		return this.#deps.store.getClientUsageSummary?.(sinceMs) ?? { clients: [] };
+	/** Broker host: aggregate recorded per-client usage since `sinceMs`, for one credential. */
+	clientSummary(sinceMs: number, credential: { provider: string; credentialId: number | null }): ClientUsageSummary {
+		return this.#deps.store.getClientUsageSummary?.(sinceMs, credential) ?? { clients: [] };
 	}
 
 	/** Merge rate-limit headers into the latest account report. */

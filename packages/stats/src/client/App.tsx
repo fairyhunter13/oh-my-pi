@@ -18,7 +18,7 @@ import {
 import { RequestDrawer } from "./ui/RequestDrawer";
 
 export default function App() {
-	const { section, setSection, range, setRange, session, setSession } = useHashRoute();
+	const { section, setSection, range, setRange, session, setSession, credential, setCredential } = useHashRoute();
 	const [refreshTrigger, setRefreshTrigger] = useState(0);
 	const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
 	const [updatedAt, setUpdatedAt] = useState<number | null>(() => Date.now());
@@ -51,6 +51,7 @@ export default function App() {
 					<OverviewRoute
 						active={isActive}
 						range={range}
+						credential={credential}
 						refreshTrigger={refreshTrigger}
 						onRequestClick={setSelectedRequestId}
 					/>
@@ -60,6 +61,7 @@ export default function App() {
 					<RequestsRoute
 						active={isActive}
 						range={range}
+						credential={credential}
 						refreshTrigger={refreshTrigger}
 						onRequestClick={setSelectedRequestId}
 					/>
@@ -78,22 +80,36 @@ export default function App() {
 					<ErrorsRoute
 						active={isActive}
 						range={range}
+						credential={credential}
 						refreshTrigger={refreshTrigger}
 						onRequestClick={setSelectedRequestId}
 					/>
 				);
 			case "models":
-				return <ModelsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return (
+					<ModelsRoute active={isActive} range={range} credential={credential} refreshTrigger={refreshTrigger} />
+				);
 			case "providers":
-				return <ProvidersRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return (
+					<ProvidersRoute
+						active={isActive}
+						range={range}
+						credential={credential}
+						refreshTrigger={refreshTrigger}
+					/>
+				);
 			case "tools":
 				return <ToolsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 			case "costs":
-				return <CostsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return (
+					<CostsRoute active={isActive} range={range} credential={credential} refreshTrigger={refreshTrigger} />
+				);
 			case "behavior":
 				return <BehaviorRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 			case "projects":
-				return <ProjectsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return (
+					<ProjectsRoute active={isActive} range={range} credential={credential} refreshTrigger={refreshTrigger} />
+				);
 			case "gain":
 				return <GainRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 		}
@@ -106,6 +122,8 @@ export default function App() {
 				onSectionChange={setSection}
 				range={range}
 				onRangeChange={setRange}
+				credential={credential}
+				onCredentialChange={setCredential}
 				updatedAt={updatedAt}
 				onSyncComplete={handleSyncComplete}
 			>

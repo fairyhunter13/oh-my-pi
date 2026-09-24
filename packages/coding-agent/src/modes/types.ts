@@ -1,7 +1,8 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CredentialSummary, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
+import type { CredentialPickerTarget } from "@oh-my-pi/pi-tui/overlays/credential-picker";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -414,7 +415,7 @@ export interface InteractiveModeContext {
 	handleSessionCommand(): Promise<void>;
 	handleAdvisorStatusCommand(): Promise<void>;
 	handleJobsCommand(): Promise<void>;
-	handleUsageCommand(reports?: UsageReport[] | null): Promise<void>;
+	handleUsageCommand(): Promise<void>;
 	handleChangelogCommand(args?: string): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;
@@ -464,8 +465,8 @@ export interface InteractiveModeContext {
 
 	// Selector handling
 	showSettingsSelector(): void;
-	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
-	showUsageDashboard(reports: UsageReport[]): void;
+	/** Open the fullscreen `/usage` dashboard overlay for one credential's report. */
+	showUsageDashboard(options: { provider: string; row: CredentialSummary; report: UsageReport }): void;
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
@@ -486,6 +487,14 @@ export interface InteractiveModeContext {
 	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(providerId?: string): Promise<void>;
 	showCredentialLogout(providerId?: string): Promise<void>;
+	/** Provider → credential picker. Undefined on Esc. A step with one choice is skipped. */
+	pickCredential(options: {
+		verb: string;
+		rows: readonly CredentialSummary[];
+		newItem?: { label: string; description: string };
+		initialProvider?: string;
+		lockProvider?: boolean;
+	}): Promise<CredentialPickerTarget | undefined>;
 	showSessionPinSelector(): Promise<void>;
 	showResetUsageSelector(): Promise<void>;
 	showProviderSetup(): Promise<void>;

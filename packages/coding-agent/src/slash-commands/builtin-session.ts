@@ -352,9 +352,13 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "gauge",
 		description: "Show provider usage and limits",
 		acpDescription: "Show token usage",
-		acpInputHint: "[show|reset [provider/credential-id|provider/active]]",
+		acpInputHint: "[show [provider/credential-id|provider/active]|reset [provider/credential-id|provider/active]]",
 		subcommands: [
-			{ name: "show", description: "Show provider usage and limits" },
+			{
+				name: "show",
+				description: "Show provider usage and limits",
+				usage: "[provider/credential-id|provider/active]",
+			},
 			{
 				name: "reset",
 				description: "Spend a saved provider rate-limit reset",
@@ -364,15 +368,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
-			if (!verb || (verb === "show" && !rest)) {
-				await runtime.output(await buildUsageReportText(runtime));
+			if (!verb || verb === "show") {
+				await runtime.output(await buildUsageReportText(runtime, rest));
 				return commandConsumed();
 			}
 			if (verb === "reset") {
 				await handleUsageResetCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /usage [show|reset [provider/credential-id|provider/active]]", runtime);
+			return usage(
+				"Usage: /usage [show [provider/credential-id|provider/active]|reset [provider/credential-id|provider/active]]",
+				runtime,
+			);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -390,7 +397,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active]]");
+			runtime.ctx.showStatus(
+				"Usage: /usage [show [provider/credential-id|provider/active]|reset [provider/credential-id|provider/active]]",
+			);
 			runtime.ctx.editor.setText("");
 		},
 	},

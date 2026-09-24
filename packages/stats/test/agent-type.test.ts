@@ -5,11 +5,13 @@ import * as path from "node:path";
 import { getOverviewStats } from "@oh-my-pi/omp-stats/aggregator";
 import { getStatsByAgentType, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { classifyAgentType } from "@oh-my-pi/omp-stats/parser";
-import type { AgentType, MessageStats } from "@oh-my-pi/omp-stats/types";
+import type { AgentType, MessageStats, StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { getConfigRootDir, getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-agent-type-");
+
+const ANTHROPIC_CREDENTIAL: StatsCredential = { provider: "anthropic", credentialId: null };
 
 interface Tokens {
 	input: number;
@@ -73,7 +75,7 @@ describe("getStatsByAgentType", () => {
 			makeMessage("a1", "advisor", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }),
 		]);
 
-		const byType = new Map(getStatsByAgentType().map(stat => [stat.agentType, stat]));
+		const byType = new Map(getStatsByAgentType(ANTHROPIC_CREDENTIAL).map(stat => [stat.agentType, stat]));
 		expect(byType.get("main")).toMatchObject({
 			totalRequests: 2,
 			totalInputTokens: 200,
@@ -91,7 +93,7 @@ describe("getStatsByAgentType", () => {
 			makeMessage("a1", "advisor", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }),
 		]);
 
-		const overview = await getOverviewStats("all");
+		const overview = await getOverviewStats(ANTHROPIC_CREDENTIAL, "all");
 		const types = overview.byAgentType.map(stat => stat.agentType).sort();
 		expect(types).toEqual(["advisor", "main"]);
 	});
@@ -175,7 +177,9 @@ describe("agent_type migration backfill", () => {
 
 		await initDb();
 
-		const byType = new Map(getStatsByAgentType().map(stat => [stat.agentType, stat.totalRequests]));
+		const byType = new Map(
+			getStatsByAgentType(ANTHROPIC_CREDENTIAL).map(stat => [stat.agentType, stat.totalRequests]),
+		);
 		expect(byType.get("main")).toBe(1);
 		expect(byType.get("subagent")).toBe(1);
 		expect(byType.get("advisor")).toBe(1);

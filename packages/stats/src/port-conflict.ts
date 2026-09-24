@@ -32,7 +32,7 @@ async function probeStatsDashboard(port: number, hostname: string): Promise<Stat
 	const probeHostname = hostname === "0.0.0.0" ? STATS_DASHBOARD_HOSTNAME : hostname === "::" ? "::1" : hostname;
 	const urlHostname = probeHostname.includes(":") ? `[${probeHostname}]` : probeHostname;
 	try {
-		const response = await fetch(`http://${urlHostname}:${port}/api/stats/models`, {
+		const response = await fetch(`http://${urlHostname}:${port}/api/stats/ping`, {
 			signal: AbortSignal.timeout(STATS_PROBE_TIMEOUT_MS),
 		});
 		const dashboardVersionHeader = response.headers.get(STATS_DASHBOARD_HEADER);

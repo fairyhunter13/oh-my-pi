@@ -14,7 +14,12 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { formatLoginIdentity, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
+import {
+	formatLoginIdentity,
+	pickOAuthProvider,
+	pickReplaceCredentialId,
+	runTerminalOAuthLogin,
+} from "./oauth-terminal";
 
 /**
  * Log in to `provider`, or to one picked interactively when omitted.
@@ -39,7 +44,15 @@ export async function runLoginCommand(provider: string | undefined): Promise<voi
 			throw new Error(`Unknown OAuth provider '${providerId}'. Run \`${APP_NAME} login\` to pick one.`);
 		}
 
-		const identity = await runTerminalOAuthLogin(rl, authStorage, info.id, { openBrowser: true });
+		const oauthRows = authStorage
+			.listCredentials(info.storeCredentialsAs ?? info.id)
+			.filter(row => row.kind === "oauth");
+		const replaceCredentialId =
+			oauthRows.length > 0 ? await pickReplaceCredentialId(rl, info.name, oauthRows) : undefined;
+		const identity = await runTerminalOAuthLogin(rl, authStorage, info.id, {
+			openBrowser: true,
+			replaceCredentialId,
+		});
 		if (!identity) {
 			process.stdout.write(chalk.yellow(`No credentials were stored for ${info.name}.\n`));
 			return;

@@ -12,11 +12,15 @@ import {
 	insertMessageStats,
 	insertToolCalls,
 } from "@oh-my-pi/omp-stats/db";
+import type { StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-malformed-");
+
+const ANTHROPIC_CREDENTIAL: StatsCredential = { provider: "anthropic", credentialId: null };
+const DEEPSEEK_CREDENTIAL: StatsCredential = { provider: "deepseek", credentialId: null };
 
 const USAGE = {
 	input: 10,
@@ -111,7 +115,7 @@ describe("malformed session entries", () => {
 		await initDb();
 		expect(insertMessageStats(result.stats)).toBe(1);
 
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(ANTHROPIC_CREDENTIAL, 1)[0];
 		expect(request?.usage.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 });
 	});
 	it("preserves partial legacy cost components when total is missing", async () => {
@@ -127,7 +131,7 @@ describe("malformed session entries", () => {
 		const result = await parseSessionFile(file);
 		await initDb();
 		expect(insertMessageStats(result.stats)).toBe(1);
-		expect(getRecentRequests(1)[0]?.usage.cost).toEqual({
+		expect(getRecentRequests(ANTHROPIC_CREDENTIAL, 1)[0]?.usage.cost).toEqual({
 			input: 1,
 			output: 0,
 			cacheRead: 0,
@@ -231,23 +235,23 @@ describe("legacy entries without a recorded price", () => {
 		await initDb();
 		expect(insertMessageStats(result.stats)).toBe(2);
 
-		const stored = getRecentRequests(2);
+		const stored = getRecentRequests(DEEPSEEK_CREDENTIAL, 2);
 		// 1M uncached input tokens at the peak card's $0.30/M.
 		expect(stored.find(request => request.entryId === "unpriced")?.usage.cost.total).toBeCloseTo(0.3, 8);
 		// A recorded zero is a real charge and stays zero.
 		expect(stored.find(request => request.entryId === "explicit-zero")?.usage.cost.total).toBe(0);
-		expect(getOverallStats().totalCost).toBeCloseTo(0.3, 8);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBeCloseTo(0.3, 8);
 		// Uncached-equivalent prompt cost 2 x $0.30 against $0.30 of recorded
 		// prompt charges (the frozen zero row contributes none).
-		expect(getOverallStats().cacheSavings).toBeCloseTo(0.5, 8);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).cacheSavings).toBeCloseTo(0.5, 8);
 
 		closeDb();
 		await initDb();
 
-		const reopened = getRecentRequests(2);
+		const reopened = getRecentRequests(DEEPSEEK_CREDENTIAL, 2);
 		expect(reopened.find(request => request.entryId === "unpriced")?.usage.cost.total).toBeCloseTo(0.3, 8);
 		expect(reopened.find(request => request.entryId === "explicit-zero")?.usage.cost.total).toBe(0);
-		expect(getOverallStats().totalCost).toBeCloseTo(0.3, 8);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBeCloseTo(0.3, 8);
 	});
 
 	it("leaves scheduled usage unpriced when the entry has no recoverable timestamp", async () => {
@@ -275,9 +279,9 @@ describe("legacy entries without a recorded price", () => {
 
 		// The parser's `0` sentinel is not a 1970 request: never bill a peak or
 		// off-peak card from it, and never let the missing charge report savings.
-		expect(getRecentRequests(1)[0]?.usage.cost.total).toBe(0);
-		expect(getOverallStats().totalCost).toBe(0);
-		expect(getOverallStats().cacheSavings).toBe(0);
+		expect(getRecentRequests(DEEPSEEK_CREDENTIAL, 1)[0]?.usage.cost.total).toBe(0);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBe(0);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).cacheSavings).toBe(0);
 	});
 
 	it("recovers the entry timestamp when the message timestamp is the zero sentinel", async () => {
@@ -306,10 +310,10 @@ describe("legacy entries without a recorded price", () => {
 		expect(insertMessageStats(result.stats)).toBe(1);
 
 		// Recovered peak time prices at the peak card instead of unpriced.
-		expect(getRecentRequests(1)[0]?.usage.cost.total).toBeCloseTo(0.3, 8);
-		expect(getRecentRequests(1)[0]?.costUnpriced).toBe(false);
-		expect(getOverallStats()).toMatchObject({ unpricedRequests: 0 });
-		expect(getOverallStats().totalCost).toBeCloseTo(0.3, 8);
+		expect(getRecentRequests(DEEPSEEK_CREDENTIAL, 1)[0]?.usage.cost.total).toBeCloseTo(0.3, 8);
+		expect(getRecentRequests(DEEPSEEK_CREDENTIAL, 1)[0]?.costUnpriced).toBe(false);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL)).toMatchObject({ unpricedRequests: 0 });
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBeCloseTo(0.3, 8);
 	});
 
 	// Regression: the derived total is summed with `+` over runtime values a
@@ -328,7 +332,7 @@ describe("legacy entries without a recorded price", () => {
 		await initDb();
 		expect(insertMessageStats(result.stats)).toBe(1);
 
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(DEEPSEEK_CREDENTIAL, 1)[0];
 		expect(typeof request?.usage.totalTokens).toBe("number");
 		expect(request?.usage.totalTokens).toBe(0);
 		expect(request?.usage.input).toBe(0);
@@ -357,7 +361,7 @@ describe("legacy entries without a recorded price", () => {
 		await initDb();
 		expect(insertMessageStats(result.stats)).toBe(2);
 
-		const stored = getRecentRequests(2);
+		const stored = getRecentRequests(DEEPSEEK_CREDENTIAL, 2);
 		const infiniteBucket = stored.find(request => request.entryId === "infinite-bucket");
 		const infiniteTotal = stored.find(request => request.entryId === "infinite-total");
 		expect(Number.isFinite(infiniteBucket?.usage.input)).toBe(true);
@@ -454,11 +458,11 @@ describe("legacy entries without a recorded price", () => {
 		// UPSERT rewrites the row with the marker the ingest now derives.
 		await syncAllSessions();
 
-		const repaired = getRecentRequests(1)[0];
+		const repaired = getRecentRequests(DEEPSEEK_CREDENTIAL, 1)[0];
 		expect(repaired?.entryId).toBe("no-timestamp");
 		expect(repaired?.usage.cost.total).toBe(0);
 		expect(repaired?.costUnpriced).toBe(true);
-		expect(getOverallStats()).toMatchObject({ unpricedRequests: 1, totalCost: 0 });
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL)).toMatchObject({ unpricedRequests: 1, totalCost: 0 });
 
 		// The sync settled the sentinel, so reopening must not wipe the offsets it
 		// just wrote — a stale enrolment would re-parse every session on every start.

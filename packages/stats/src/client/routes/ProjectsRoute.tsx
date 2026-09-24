@@ -4,23 +4,28 @@ import { formatDurationMs, formatEstimatedCost, formatInteger, formatPercent } f
 import { useResource } from "../data/useResource";
 import { buildFolderRows, type FolderRowView } from "../data/view-models";
 import type { TimeRange } from "../types";
-import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
+import { AsyncBoundary, DataTable, EmptyState, Panel, StatusPill } from "../ui";
 
 export interface ProjectsRouteProps {
 	active: boolean;
 	range: TimeRange;
+	credential: string | null;
 	refreshTrigger: number;
 }
 
-export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRouteProps) {
+export function ProjectsRoute({ active, range, credential, refreshTrigger }: ProjectsRouteProps) {
 	const {
 		data: foldersData,
 		error,
 		loading,
-	} = useResource(["projects", range, refreshTrigger], signal => getFolderStats(range, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+	} = useResource(
+		["projects", range, credential, refreshTrigger],
+		signal => getFolderStats(range, credential as string, signal),
+		{
+			pollMs: 30000,
+			enabled: active && credential !== null,
+		},
+	);
 
 	const folderRows = useMemo(() => {
 		if (!foldersData) return [];
@@ -153,6 +158,8 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 			</div>
 		</div>
 	);
+
+	if (!credential) return <EmptyState message="Pick a credential to see its numbers." />;
 
 	return (
 		<div className="stats-route-container">

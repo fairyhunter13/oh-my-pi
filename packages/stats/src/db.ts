@@ -28,6 +28,7 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	StatsCredential,
 	TimeSeriesPoint,
 	ToolCallStats,
 	ToolModelStats,
@@ -72,6 +73,21 @@ function unpricedRequestSql(prefix = ""): string {
 }
 
 const UNPRICED_REQUEST_SQL = unpricedRequestSql();
+
+/**
+ * WHERE clause matching one {@link StatsCredential}. `credential_id IS ?`
+ * (not `=`) so `credentialId: null` matches the unattributed rows a `NULL`
+ * column holds instead of matching nothing. `prefix` qualifies the columns
+ * for queries that alias `messages`.
+ */
+function credentialSql(prefix = ""): string {
+	return `${prefix}provider = ? AND ${prefix}credential_id IS ?`;
+}
+
+/** Bind values for {@link credentialSql}, in the clause's column order. */
+function credentialSqlParams(credential: StatsCredential): [string, number | null] {
+	return [credential.provider, credential.credentialId];
+}
 
 interface CostBackfillRow {
 	id: number;
@@ -159,6 +175,11 @@ const COST_REINGEST_BACKFILL_KEY = "messages_cost_reingest_v1";
 // above is already spent for them — without this one, every historical row
 // keeps `cost_unpriced = 0` and unknown scheduled spend reports as free.
 const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v1";
+// `credential_id` is a new column on an existing table: every prior row reads
+// as NULL ("unattributed") until a re-parse fills it from the session's
+// `AssistantMessage.credentialId`. Same sentinel protocol as
+// `COST_REINGEST_BACKFILL_KEY`.
+const MESSAGES_CREDENTIAL_BACKFILL_KEY = "messages_credential_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -211,6 +232,7 @@ export async function initDb(): Promise<Database> {
 			cost_no_cache_input REAL,
 			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
+			credential_id INTEGER,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -297,6 +319,12 @@ export async function initDb(): Promise<Database> {
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
 	}
+	if (!messageColumns.some(column => column.name === "credential_id")) {
+		db.run("ALTER TABLE messages ADD COLUMN credential_id INTEGER");
+	}
+	db.run(
+		"CREATE INDEX IF NOT EXISTS idx_messages_provider_credential_timestamp ON messages(provider, credential_id, timestamp)",
+	);
 	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
@@ -377,6 +405,7 @@ export async function initDb(): Promise<Database> {
 	backfillToolCalls(db);
 	backfillReingestCosts(db);
 	backfillUnpricedCosts(db);
+	backfillMessagesCredential(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
@@ -726,9 +755,9 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			duration, ttft, stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
 			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
-			cost_unpriced, agent_type
+			cost_unpriced, agent_type, credential_id
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
@@ -741,7 +770,8 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			cost_cache_write = excluded.cost_cache_write,
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
-			cost_unpriced = excluded.cost_unpriced
+			cost_unpriced = excluded.cost_unpriced,
+			credential_id = excluded.credential_id
 	`);
 
 	let inserted = 0;
@@ -775,6 +805,7 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 				noCacheInputCost,
 				unpriced ? 1 : 0,
 				s.agentType,
+				s.credentialId ?? null,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp).
 				s.entryId,
@@ -854,7 +885,7 @@ function buildAggregatedStats(rows: AggregatedStatsRow[]): AggregatedStats {
 /**
  * Get overall aggregated stats.
  */
-export function getOverallStats(cutoff?: number): AggregatedStats {
+export function getOverallStats(credential: StatsCredential, cutoff?: number): AggregatedStats {
 	if (!db) return buildAggregatedStats([]);
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
@@ -879,16 +910,17 @@ export function getOverallStats(cutoff?: number): AggregatedStats {
 			MIN(timestamp) as first_timestamp,
 			MAX(timestamp) as last_timestamp
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 	`);
 
-	const rows = hasCutoff ? stmt.all(cutoff) : stmt.all();
+	const params = credentialSqlParams(credential);
+	const rows = hasCutoff ? stmt.all(...params, cutoff) : stmt.all(...params);
 	return buildAggregatedStats(rows as AggregatedStatsRow[]);
 }
 /**
  * Get stats grouped by model.
  */
-export function getStatsByModel(cutoff?: number): ModelStats[] {
+export function getStatsByModel(credential: StatsCredential, cutoff?: number): ModelStats[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
@@ -915,12 +947,13 @@ export function getStatsByModel(cutoff?: number): ModelStats[] {
 			MIN(timestamp) as first_timestamp,
 			MAX(timestamp) as last_timestamp
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY model, provider
 		ORDER BY total_requests DESC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ModelStatsRow[];
+	const params = credentialSqlParams(credential);
+	const rows = (hasCutoff ? stmt.all(...params, cutoff) : stmt.all(...params)) as ModelStatsRow[];
 	return rows.map(row => ({
 		model: row.model,
 		provider: row.provider,
@@ -931,7 +964,7 @@ export function getStatsByModel(cutoff?: number): ModelStats[] {
 /**
  * Get stats grouped by folder.
  */
-export function getStatsByFolder(cutoff?: number): FolderStats[] {
+export function getStatsByFolder(credential: StatsCredential, cutoff?: number): FolderStats[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
@@ -957,12 +990,13 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 			MIN(timestamp) as first_timestamp,
 			MAX(timestamp) as last_timestamp
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY folder
 		ORDER BY total_requests DESC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as FolderStatsRow[];
+	const params = credentialSqlParams(credential);
+	const rows = (hasCutoff ? stmt.all(...params, cutoff) : stmt.all(...params)) as FolderStatsRow[];
 	return rows.map(row => ({
 		folder: row.folder,
 		...buildAggregatedStats([row]),
@@ -974,7 +1008,7 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
  * Token columns are explicit so the dashboard's share denominator matches the
  * counts it renders. Rows missing `agent_type` (defensive) fall back to "main".
  */
-export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
+export function getStatsByAgentType(credential: StatsCredential, cutoff?: number): AgentTypeStats[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
@@ -988,11 +1022,12 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(cost_total) as total_cost
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY agent_type
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as any[];
+	const params = credentialSqlParams(credential);
+	const rows = (hasCutoff ? stmt.all(...params, cutoff) : stmt.all(...params)) as any[];
 	return rows.map(row => ({
 		agentType: (row.agent_type as AgentType) ?? "main",
 		totalRequests: row.total_requests || 0,
@@ -1007,7 +1042,12 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 /**
  * Get time series data.
  */
-export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 * 60 * 1000): TimeSeriesPoint[] {
+export function getTimeSeries(
+	credential: StatsCredential,
+	hours = 24,
+	cutoff?: number | null,
+	bucketMs = 60 * 60 * 1000,
+): TimeSeriesPoint[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== null;
@@ -1021,14 +1061,15 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
 			SUM(total_tokens) as tokens,
 			SUM(cost_total) as cost
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY bucket
 		ORDER BY bucket ASC
 	`);
 
+	const params = credentialSqlParams(credential);
 	const rows = hasCutoff
-		? (stmt.all(bucketMs, bucketMs, seriesCutoff) as any[])
-		: (stmt.all(bucketMs, bucketMs) as any[]);
+		? (stmt.all(bucketMs, bucketMs, ...params, seriesCutoff) as any[])
+		: (stmt.all(bucketMs, bucketMs, ...params) as any[]);
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		requests: row.requests,
@@ -1045,6 +1086,7 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
  * Get daily model usage time series data for the last N days.
  */
 export function getModelTimeSeries(
+	credential: StatsCredential,
 	days = 14,
 	cutoff?: number | null,
 	bucketMs = 24 * 60 * 60 * 1000,
@@ -1061,12 +1103,15 @@ export function getModelTimeSeries(
 			provider,
 			COUNT(*) as requests
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY bucket, model, provider
 		ORDER BY bucket ASC
 	`);
 
-	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const params = credentialSqlParams(credential);
+	const rowsRaw = hasCutoff
+		? stmt.all(bucketMs, bucketMs, ...params, seriesCutoff)
+		: stmt.all(bucketMs, bucketMs, ...params);
 	const rows = rowsRaw as Array<{ bucket: number; model: string; provider: string; requests: number }>;
 	return rows.map(row => ({
 		timestamp: row.bucket,
@@ -1079,7 +1124,7 @@ export function getModelTimeSeries(
 /**
  * Get request/token/cost totals grouped by provider.
  */
-export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] {
+export function getStatsByProvider(credential: StatsCredential, cutoff?: number | null): ProviderAggregate[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== undefined && cutoff !== null && cutoff > 0;
@@ -1099,12 +1144,13 @@ export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] 
 			SUM(premium_requests) as total_premium_requests,
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY provider
 		ORDER BY total_tokens DESC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as Array<{
+	const params = credentialSqlParams(credential);
+	const rows = (hasCutoff ? stmt.all(...params, cutoff) : stmt.all(...params)) as Array<{
 		provider: string;
 		total_requests: number;
 		failed_requests: number;
@@ -1141,7 +1187,7 @@ export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] 
  * Hours use the server's timezone — the dashboard is a localhost tool, so
  * server-local and viewer-local time coincide.
  */
-export function getProviderHourlyBurn(cutoff?: number | null): ProviderHourlyPoint[] {
+export function getProviderHourlyBurn(credential: StatsCredential, cutoff?: number | null): ProviderHourlyPoint[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== undefined && cutoff !== null && cutoff > 0;
@@ -1153,12 +1199,13 @@ export function getProviderHourlyBurn(cutoff?: number | null): ProviderHourlyPoi
 			SUM(output_tokens) as output_tokens,
 			COUNT(*) as requests
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY provider, hour
 		ORDER BY provider, hour
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as Array<{
+	const params = credentialSqlParams(credential);
+	const rows = (hasCutoff ? stmt.all(...params, cutoff) : stmt.all(...params)) as Array<{
 		provider: string;
 		hour: number;
 		total_tokens: number | null;
@@ -1178,6 +1225,7 @@ export function getProviderHourlyBurn(cutoff?: number | null): ProviderHourlyPoi
  * Get token/cost time series grouped by provider (bucketed like the model series).
  */
 export function getProviderTimeSeries(
+	credential: StatsCredential,
 	days = 14,
 	cutoff?: number | null,
 	bucketMs = 24 * 60 * 60 * 1000,
@@ -1196,12 +1244,15 @@ export function getProviderTimeSeries(
 			SUM(${UNPRICED_REQUEST_SQL}) as unpriced_requests,
 			COUNT(*) as requests
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY bucket, provider
 		ORDER BY bucket ASC
 	`);
 
-	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const params = credentialSqlParams(credential);
+	const rowsRaw = hasCutoff
+		? stmt.all(bucketMs, bucketMs, ...params, seriesCutoff)
+		: stmt.all(bucketMs, bucketMs, ...params);
 	const rows = rowsRaw as Array<{
 		bucket: number;
 		provider: string;
@@ -1224,6 +1275,7 @@ export function getProviderTimeSeries(
  * Get daily model performance time series data for the last N days.
  */
 export function getModelPerformanceSeries(
+	credential: StatsCredential,
 	days = 14,
 	cutoff?: number | null,
 	bucketMs = 24 * 60 * 60 * 1000,
@@ -1242,12 +1294,15 @@ export function getModelPerformanceSeries(
 			AVG(ttft) as avg_ttft,
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY bucket, model, provider
 		ORDER BY bucket ASC
 	`);
 
-	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const params = credentialSqlParams(credential);
+	const rowsRaw = hasCutoff
+		? stmt.all(bucketMs, bucketMs, ...params, seriesCutoff)
+		: stmt.all(bucketMs, bucketMs, ...params);
 	const rows = rowsRaw as Array<{
 		bucket: number;
 		model: string;
@@ -1274,6 +1329,29 @@ export function getMessageCount(): number {
 	const stmt = db.prepare("SELECT COUNT(*) as count FROM messages");
 	const row = stmt.get() as { count: number };
 	return row.count;
+}
+
+/** Every credential the `messages` table has rows for, most-requests-recently first per row. */
+export function listStatsCredentials(): Array<StatsCredential & { requests: number; lastSeen: number }> {
+	if (!db) return [];
+	const stmt = db.prepare(`
+		SELECT provider, credential_id, COUNT(*) as requests, MAX(timestamp) as last_seen
+		FROM messages
+		GROUP BY provider, credential_id
+		ORDER BY provider, credential_id
+	`);
+	const rows = stmt.all() as Array<{
+		provider: string;
+		credential_id: number | null;
+		requests: number;
+		last_seen: number;
+	}>;
+	return rows.map(row => ({
+		provider: row.provider,
+		credentialId: row.credential_id,
+		requests: row.requests,
+		lastSeen: row.last_seen,
+	}));
 }
 
 /**
@@ -1317,30 +1395,33 @@ function rowToMessageStats(row: any): MessageStats {
 		},
 		agentType: (row.agent_type as AgentType) ?? "main",
 		costUnpriced: row.cost_unpriced === 1,
+		credentialId: row.credential_id ?? null,
 	};
 }
 
-export function getRecentRequests(limit = 100): MessageStats[] {
+export function getRecentRequests(credential: StatsCredential, limit = 100): MessageStats[] {
 	if (!db) return [];
 	const stmt = db.prepare(`
-		SELECT * FROM messages 
-		ORDER BY timestamp DESC 
+		SELECT * FROM messages
+		WHERE ${credentialSql()}
+		ORDER BY timestamp DESC
 		LIMIT ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return stmt.all(...credentialSqlParams(credential), limit).map(rowToMessageStats);
 }
 
-export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
+export function getRecentErrors(credential: StatsCredential, limit = 100, cutoff?: number | null): MessageStats[] {
 	if (!db) return [];
 	const hasCutoff = cutoff !== undefined && cutoff !== null;
 	const stmt = db.prepare(`
 		SELECT * FROM messages
-		WHERE stop_reason = 'error'
+		WHERE stop_reason = 'error' AND ${credentialSql()}
 		${hasCutoff ? "AND timestamp >= ?" : ""}
 		ORDER BY timestamp DESC
 		LIMIT ?
 	`);
-	const rows = hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit);
+	const params = credentialSqlParams(credential);
+	const rows = hasCutoff ? stmt.all(...params, cutoff, limit) : stmt.all(...params, limit);
 	return rows.map(rowToMessageStats);
 }
 
@@ -1397,7 +1478,11 @@ export function getToolCallCountsBySession(): Map<string, number> {
 /**
  * Get daily cost time series data for the last N days, broken down by model.
  */
-export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSeriesPoint[] {
+export function getCostTimeSeries(
+	credential: StatsCredential,
+	days = 90,
+	cutoff?: number | null,
+): CostTimeSeriesPoint[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== null;
@@ -1416,12 +1501,13 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 			SUM(cost_cache_write) as cost_cache_write,
 			COUNT(*) as requests
 		FROM messages
-		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		WHERE ${credentialSql()}${hasCutoff ? " AND timestamp >= ?" : ""}
 		GROUP BY bucket, model, provider
 		ORDER BY bucket ASC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(seriesCutoff) : stmt.all()) as CostTimeSeriesRow[];
+	const params = credentialSqlParams(credential);
+	const rows = (hasCutoff ? stmt.all(...params, seriesCutoff) : stmt.all(...params)) as CostTimeSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		model: row.model,
@@ -1437,13 +1523,13 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 }
 
 /**
- * Per-local-day activity aggregates for the last `days` days, oldest first.
- * Self-initializing (opens the stats DB on first use) so the coding-agent TUI
- * can query without the dashboard server's init flow. Days use the machine's
- * timezone — this is a localhost tool, same rationale as
- * {@link getProviderHourlyBurn}.
+ * Per-local-day activity aggregates for the last `days` days, oldest first,
+ * for one credential. Self-initializing (opens the stats DB on first use) so
+ * the coding-agent TUI can query without the dashboard server's init flow.
+ * Days use the machine's timezone — this is a localhost tool, same rationale
+ * as {@link getProviderHourlyBurn}.
  */
-export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]> {
+export async function getDailyActivity(credential: StatsCredential, days = 371): Promise<DailyActivityPoint[]> {
 	const database = await initDb();
 	const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
 	const stmt = database.prepare(`
@@ -1453,11 +1539,11 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
 			COUNT(*) as requests,
 			SUM(total_tokens) as total_tokens
 		FROM messages
-		WHERE timestamp >= ?
+		WHERE ${credentialSql()} AND timestamp >= ?
 		GROUP BY day
 		ORDER BY day ASC
 	`);
-	const rows = stmt.all(cutoff) as Array<{
+	const rows = stmt.all(...credentialSqlParams(credential), cutoff) as Array<{
 		day: string;
 		cost: number | null;
 		requests: number;
@@ -1586,6 +1672,25 @@ function backfillUnpricedCosts(database: Database): void {
 	database
 		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(COST_UNPRICED_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
+ * One-shot `file_offsets` wipe so the next sync re-parses every session and
+ * fills `credential_id` from `AssistantMessage.credentialId`. The column is
+ * new on an existing table, so every row read `NULL` (unattributed) until
+ * this backfill spends its sentinel. Same protocol as
+ * {@link backfillReingestCosts}.
+ */
+function backfillMessagesCredential(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(MESSAGES_CREDENTIAL_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	database.run("DELETE FROM file_offsets");
+	database
+		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(MESSAGES_CREDENTIAL_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
 /**

@@ -1850,6 +1850,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		};
 	} | null {
 		if (!Array.isArray(reports)) return null;
+		// With no active identity, several reports of the same provider merge
+		// into one aggregate quota. Show nothing rather than a merged number.
+		if (!context.identity) {
+			const matching = reports.filter(report => {
+				if (report === null || typeof report !== "object") return false;
+				const provider = "provider" in report ? report.provider : undefined;
+				return provider === context.provider;
+			});
+			if (matching.length !== 1) return null;
+		}
 		const now = Date.now();
 		const resetReports: UsageReport[] = [];
 		const activeModelId = normalizeUsageScopeValue(context.modelId);

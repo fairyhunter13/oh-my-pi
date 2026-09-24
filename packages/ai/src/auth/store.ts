@@ -142,8 +142,11 @@ export interface UsageLedgerStore {
 	recordObservedUsage(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void;
 	/** Broker host: persist one client's observed-usage report. */
 	recordClientUsage(report: ClientUsageReport): void;
-	/** Broker host: aggregate recorded per-client usage since a timestamp. */
-	getClientUsageSummary(sinceMs: number): ClientUsageSummary;
+	/** Broker host: aggregate recorded per-client usage since a timestamp, for one credential. */
+	getClientUsageSummary(
+		sinceMs: number,
+		credential: { provider: string; credentialId: number | null },
+	): ClientUsageSummary;
 }
 
 /** Broker-delegated OAuth refresh and usage-report operations. */

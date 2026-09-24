@@ -1,4 +1,4 @@
-import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
+import type { DailyActivityPoint, StatsCredential } from "@oh-my-pi/omp-stats/shared-types";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -59,6 +59,7 @@ function spawnStatsActivityWorker(): StatsActivityWorkerHandle {
  * transactional and the OS-owned sync lock is released with the process.
  */
 export async function loadDailyActivity(
+	credential: StatsCredential,
 	push: (points: DailyActivityPoint[]) => void,
 	signal?: AbortSignal,
 ): Promise<void> {
@@ -85,7 +86,7 @@ export async function loadDailyActivity(
 	const offError = worker.onError(reject);
 	const onAbort = (): void => resolve();
 	signal?.addEventListener("abort", onAbort, { once: true });
-	worker.send({ type: "load", id: requestId });
+	worker.send({ type: "load", id: requestId, credential });
 	try {
 		await promise;
 	} finally {

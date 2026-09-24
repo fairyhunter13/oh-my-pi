@@ -10,11 +10,13 @@
 import * as readline from "node:readline";
 import {
 	type AuthStorage,
+	type CredentialSummary,
 	type OAuthLoginIdentity,
 	type OAuthProviderId,
 	type OAuthProviderInfo,
 	PASTE_CODE_LOGIN_PROVIDERS,
 } from "@oh-my-pi/pi-ai";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import { openPath } from "../utils/open";
 
 /**
@@ -135,6 +137,31 @@ export async function pickOAuthProvider(
 }
 
 /**
+ * Numbered picker over a provider's stored OAuth rows plus "Add a new
+ * account"; resolves the row id to re-login as, or `undefined` for a new one.
+ *
+ * @throws when the answer is not a listed number, or the prompt is cancelled.
+ */
+export async function pickReplaceCredentialId(
+	rl: readline.Interface,
+	providerName: string,
+	rows: readonly CredentialSummary[],
+): Promise<number | undefined> {
+	process.stdout.write(`Log in: ${providerName} — pick a credential\n\n`);
+	process.stdout.write("  0. Add a new account\n");
+	for (let i = 0; i < rows.length; i++) {
+		process.stdout.write(`  ${i + 1}. Log in again as ${credentialName(rows[i])} (#${rows[i].id})\n`);
+	}
+	process.stdout.write("\n");
+	const choice = await promptLine(rl, `Enter number (0-${rows.length}): `);
+	const index = Number.parseInt(choice, 10);
+	if (Number.isNaN(index) || index < 0 || index > rows.length) {
+		throw new Error(`Invalid selection: ${choice}`);
+	}
+	return index === 0 ? undefined : rows[index - 1].id;
+}
+
+/**
  * Run `provider`'s OAuth flow against `storage`, printing the auth URL and
  * progress to stdout and reading prompts from stdin. Resolves with the stored
  * identity (`undefined` when the flow stored nothing).
@@ -148,7 +175,7 @@ export async function runTerminalOAuthLogin(
 	rl: readline.Interface,
 	storage: AuthStorage,
 	provider: OAuthProviderId,
-	options: { openBrowser?: boolean } = {},
+	options: { openBrowser?: boolean; replaceCredentialId?: number } = {},
 ): Promise<OAuthLoginIdentity | undefined> {
 	const ask = (msg: string, signal?: AbortSignal) => promptLine(rl, `${msg} `, signal);
 	// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
@@ -160,6 +187,7 @@ export async function runTerminalOAuthLogin(
 	// for non-paste-code providers, so this is defense-in-depth on the same gate.
 	const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
 	return storage.oauth.login(provider, {
+		replaceCredentialId: options.replaceCredentialId,
 		onAuth({ url, launchUrl, instructions }) {
 			process.stdout.write("\nOpen this URL in your browser:\n");
 			// Full URL first so the CLI works from any machine, including SSH

@@ -51,6 +51,7 @@ import type {
 	MessageStats,
 	ProviderDashboardStats,
 	RequestDetails,
+	StatsCredential,
 	ToolDashboardStats,
 } from "./types";
 import { computeUsageWindowStats, fetchUsageData } from "./usage-windows";
@@ -440,7 +441,7 @@ export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
 /**
  * Get all dashboard stats.
  */
-export async function getDashboardStats(range?: string | null): Promise<DashboardStats> {
+export async function getDashboardStats(credential: StatsCredential, range?: string | null): Promise<DashboardStats> {
 	await initDb();
 	const {
 		timeSeriesHours,
@@ -454,31 +455,38 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 	} = getTimeRangeConfig(range);
 
 	return {
-		overall: getOverallStats(cutoff ?? undefined),
-		byModel: getStatsByModel(cutoff ?? undefined),
-		byFolder: getStatsByFolder(cutoff ?? undefined),
-		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
+		overall: getOverallStats(credential, cutoff ?? undefined),
+		byModel: getStatsByModel(credential, cutoff ?? undefined),
+		byFolder: getStatsByFolder(credential, cutoff ?? undefined),
+		byAgentType: getStatsByAgentType(credential, cutoff ?? undefined),
+		timeSeries: getTimeSeries(credential, timeSeriesHours, cutoff, timeSeriesBucketMs),
+		modelSeries: getModelTimeSeries(credential, modelSeriesDays, cutoff, modelSeriesBucketMs),
+		modelPerformanceSeries: getModelPerformanceSeries(
+			credential,
+			modelPerformanceDays,
+			cutoff,
+			modelPerformanceBucketMs,
+		),
+		costSeries: getCostTimeSeries(credential, costSeriesDays, cutoff),
 	};
 }
 
 export async function getOverviewStats(
+	credential: StatsCredential,
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
 	await initDb();
 	const { timeSeriesHours, timeSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
 
 	return {
-		overall: getOverallStats(cutoff ?? undefined),
-		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
+		overall: getOverallStats(credential, cutoff ?? undefined),
+		byAgentType: getStatsByAgentType(credential, cutoff ?? undefined),
+		timeSeries: getTimeSeries(credential, timeSeriesHours, cutoff, timeSeriesBucketMs),
 	};
 }
 
 export async function getModelDashboardStats(
+	credential: StatsCredential,
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "byModel" | "modelSeries" | "modelPerformanceSeries">> {
 	await initDb();
@@ -486,36 +494,48 @@ export async function getModelDashboardStats(
 		getTimeRangeConfig(range);
 
 	return {
-		byModel: getStatsByModel(cutoff ?? undefined),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
+		byModel: getStatsByModel(credential, cutoff ?? undefined),
+		modelSeries: getModelTimeSeries(credential, modelSeriesDays, cutoff, modelSeriesBucketMs),
+		modelPerformanceSeries: getModelPerformanceSeries(
+			credential,
+			modelPerformanceDays,
+			cutoff,
+			modelPerformanceBucketMs,
+		),
 	};
 }
 
-export async function getCostDashboardStats(range?: string | null): Promise<Pick<DashboardStats, "costSeries">> {
+export async function getCostDashboardStats(
+	credential: StatsCredential,
+	range?: string | null,
+): Promise<Pick<DashboardStats, "costSeries">> {
 	await initDb();
 	const { costSeriesDays, cutoff } = getTimeRangeConfig(range);
 
 	return {
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
+		costSeries: getCostTimeSeries(credential, costSeriesDays, cutoff),
 	};
 }
 
-export async function getFolderStats(range?: string | null): Promise<FolderStats[]> {
+export async function getFolderStats(credential: StatsCredential, range?: string | null): Promise<FolderStats[]> {
 	await initDb();
 	const { cutoff } = getTimeRangeConfig(range);
-	return getStatsByFolder(cutoff ?? undefined);
+	return getStatsByFolder(credential, cutoff ?? undefined);
 }
 
-export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
+export async function getRecentRequests(credential: StatsCredential, limit?: number): Promise<MessageStats[]> {
 	await initDb();
-	return dbGetRecentRequests(limit);
+	return dbGetRecentRequests(credential, limit);
 }
 
-export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {
+export async function getRecentErrors(
+	credential: StatsCredential,
+	range?: string | null,
+	limit?: number,
+): Promise<MessageStats[]> {
 	await initDb();
 	const { cutoff } = getTimeRangeConfig(range);
-	return dbGetRecentErrors(limit, cutoff);
+	return dbGetRecentErrors(credential, limit, cutoff);
 }
 
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {
@@ -578,17 +598,20 @@ export async function getToolDashboardStats(range?: string | null): Promise<Tool
  * configured — the window fractions cover every install sharing the broker's
  * credentials, so dividing them into local-only tokens would undercount.
  */
-export async function getProviderDashboardStats(range?: string | null): Promise<ProviderDashboardStats> {
+export async function getProviderDashboardStats(
+	credential: StatsCredential,
+	range?: string | null,
+): Promise<ProviderDashboardStats> {
 	await initDb();
 	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
-	const providers = getStatsByProvider(cutoff ?? undefined);
-	const usage = await fetchUsageData(cutoff ?? 0);
+	const providers = getStatsByProvider(credential, cutoff ?? undefined);
+	const usage = await fetchUsageData(cutoff ?? 0, credential);
 	const tokensByProvider = usage.fleetTokensByProvider ?? new Map(providers.map(p => [p.provider, p.totalTokens]));
 	const { usageSeries, windowInsights } = computeUsageWindowStats(usage.rows, tokensByProvider);
 	return {
 		providers,
-		hourly: getProviderHourlyBurn(cutoff ?? undefined),
-		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+		hourly: getProviderHourlyBurn(credential, cutoff ?? undefined),
+		series: getProviderTimeSeries(credential, modelSeriesDays, cutoff, modelSeriesBucketMs),
 		usageSeries,
 		windowInsights,
 	};

@@ -7,34 +7,43 @@ import { CHART_THEMES } from "../components/chart-shared";
 import { formatDurationMs, formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import type { MessageStats, TimeRange } from "../types";
-import { AsyncBoundary, DataTable, MetricCluster, Panel, Skeleton, StatusPill } from "../ui";
+import { AsyncBoundary, DataTable, EmptyState, MetricCluster, Panel, Skeleton, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
 
 export interface OverviewRouteProps {
 	active: boolean;
 	range: TimeRange;
+	credential: string | null;
 	refreshTrigger: number;
 	onRequestClick: (id: number) => void;
 }
 
-export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }: OverviewRouteProps) {
+export function OverviewRoute({ active, range, credential, refreshTrigger, onRequestClick }: OverviewRouteProps) {
 	const {
 		data: overview,
 		error: overviewError,
 		loading: overviewLoading,
-	} = useResource(["overview", range, refreshTrigger], signal => getOverviewStats(range, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+	} = useResource(
+		["overview", range, credential, refreshTrigger],
+		signal => getOverviewStats(range, credential as string, signal),
+		{
+			pollMs: 30000,
+			enabled: active && credential !== null,
+		},
+	);
 
 	const {
 		data: recentRequests,
 		error: requestsError,
 		loading: requestsLoading,
-	} = useResource(["recent-requests", refreshTrigger], signal => getRecentRequests(50, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+	} = useResource(
+		["recent-requests", credential, refreshTrigger],
+		signal => getRecentRequests(50, credential as string, signal),
+		{
+			pollMs: 30000,
+			enabled: active && credential !== null,
+		},
+	);
 
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
@@ -218,6 +227,8 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		if (!recentRequests) return [];
 		return recentRequests.slice(0, 10);
 	}, [recentRequests]);
+
+	if (!credential) return <EmptyState message="Pick a credential to see its numbers." />;
 
 	return (
 		<div className="stats-route-container space-y-6">

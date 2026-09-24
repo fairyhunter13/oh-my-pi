@@ -48,7 +48,13 @@ import {
 } from "../../extensibility/plugins/marketplace";
 import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentHubOpenOptions, InteractiveModeContext } from "../../modes/types";
-import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
+import type {
+	AuthCredential,
+	OAuthAccountIdentity,
+	ResetCreditAccountStatus,
+	ResetCreditRedeemOutcome,
+	StoredAuthCredential,
+} from "../../session/auth-storage";
 import {
 	createForeignSessionStore,
 	foreignSessionInfoToSessionInfo,
@@ -97,10 +103,10 @@ import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import type {
-	CredentialLogoutComponent as CredentialLogoutComponentType,
-	CredentialLogoutProvider,
-	CredentialLogoutTarget,
-} from "@oh-my-pi/pi-tui/overlays/credential-logout";
+	CredentialPickerComponent as CredentialPickerComponentType,
+	CredentialPickerProvider,
+	CredentialPickerTarget,
+} from "@oh-my-pi/pi-tui/overlays/credential-picker";
 import type { LoginDialogComponent as LoginDialogComponentType } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import type {
 	ModelHubComponent as ModelHubComponentType,
@@ -114,7 +120,10 @@ import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/p
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
 import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
-import { SessionAccountSelectorComponent, type SessionPinSelection } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+import {
+	SessionAccountSelectorComponent,
+	type SessionPinSelection,
+} from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -160,7 +169,7 @@ interface ProviderAuthUiModules {
 	PASTE_CODE_LOGIN_PROVIDERS: typeof PasteCodeLoginProviders;
 	getOAuthProviders: typeof GetOAuthProviders;
 	LoginDialogComponent: typeof LoginDialogComponentType;
-	CredentialLogoutComponent: typeof CredentialLogoutComponentType;
+	CredentialPickerComponent: typeof CredentialPickerComponentType;
 	OAuthSelectorComponent: typeof OAuthSelectorComponentType;
 }
 
@@ -170,11 +179,26 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 		PASTE_CODE_LOGIN_PROVIDERS: require("@oh-my-pi/pi-ai/index.js").PASTE_CODE_LOGIN_PROVIDERS,
 		getOAuthProviders: require("@oh-my-pi/pi-ai/registry/oauth/index.js").getOAuthProviders,
 		LoginDialogComponent: require("@oh-my-pi/pi-tui/overlays/login-dialog.js").LoginDialogComponent,
-		CredentialLogoutComponent: require("@oh-my-pi/pi-tui/overlays/credential-logout.js").CredentialLogoutComponent,
+		CredentialPickerComponent: require("@oh-my-pi/pi-tui/overlays/credential-picker.js").CredentialPickerComponent,
 		OAuthSelectorComponent: require("@oh-my-pi/pi-tui/overlays/oauth-selector.js").OAuthSelectorComponent,
 	};
 }
 
+/** The `OAuthAccountIdentity` of a stored OAuth credential row, or `undefined` for an API key. */
+function identityOfStoredCredential(
+	row: CredentialSummary,
+	stored: StoredAuthCredential | undefined,
+): OAuthAccountIdentity | undefined {
+	const credential: AuthCredential | undefined = stored?.credential;
+	if (row.kind !== "oauth" || credential?.type !== "oauth") return undefined;
+	const identity: OAuthAccountIdentity = {};
+	if (credential.accountId) identity.accountId = credential.accountId;
+	if (credential.email) identity.email = credential.email;
+	if (credential.projectId) identity.projectId = credential.projectId;
+	if (credential.orgId) identity.orgId = credential.orgId;
+	if (credential.orgName) identity.orgName = credential.orgName;
+	return Object.keys(identity).length > 0 ? identity : undefined;
+}
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -336,29 +360,23 @@ export class SelectorController {
 	 * idiom): compact subscriptions grid + daily activity heatmap, with the
 	 * classic full report one keypress away. Takes no transcript space.
 	 */
-	showUsageDashboard(reports: UsageReport[]): void {
-		const currentProvider = this.ctx.session.model?.provider;
-		const activeAccount = currentProvider
-			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
-			: undefined;
-		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
+	showUsageDashboard(options: { provider: string; row: CredentialSummary; report: UsageReport }): void {
+		const { provider, row, report } = options;
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const stored = authStorage.credentials.list(provider).find(entry => entry.id === row.id);
+		const identity = identityOfStoredCredential(row, stored);
+		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors([report]);
 		const done = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
 		const dashboard = new UsageDashboardComponent({
-			reports,
+			report,
+			credentialLabel: `${credentialName(row)} (#${row.id})`,
 			renderDetail: width =>
-				renderUsageReports(
-					reports,
-					theme,
-					Date.now(),
-					width,
-					provider => (provider === currentProvider ? activeAccount : undefined),
-					usageModelSelectors,
-				),
-			loadActivity: loadDailyActivity,
+				renderUsageReports([report], theme, Date.now(), width, () => identity, usageModelSelectors),
+			loadActivity: (push, signal) => loadDailyActivity({ provider, credentialId: row.id }, push, signal),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});
@@ -1775,7 +1793,7 @@ export class SelectorController {
 	 * rejects, and the editor is restored immediately. Returns true when
 	 * credentials were stored.
 	 */
-	async #handleOAuthLogin(providerId: string): Promise<boolean> {
+	async #handleOAuthLogin(providerId: string, replaceCredentialId?: number): Promise<boolean> {
 		this.ctx.showStatus(`Logging in to ${providerId}…`);
 		const { LoginDialogComponent, PASTE_CODE_LOGIN_PROVIDERS } = loadProviderAuthUi();
 		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
@@ -1805,6 +1823,7 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 		try {
 			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId as OAuthProvider, {
+				replaceCredentialId,
 				signal: dialog.signal,
 				onBrowserSession: captureBrowserSession,
 				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
@@ -1834,7 +1853,8 @@ export class SelectorController {
 			// are left untouched. `refreshProvider` swallows discovery failures, so
 			// awaiting cannot reject the login.
 			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
-			if (identity?.credentialId !== undefined) {
+			// A re-login keeps the row's existing name and scope.
+			if (identity?.credentialId !== undefined && replaceCredentialId === undefined) {
 				await this.#nameAndScopeCredentialAfterLogin(providerId, identity.credentialId);
 			}
 			const block = new TranscriptBlock();
@@ -1915,9 +1935,15 @@ export class SelectorController {
 			settled = true;
 			resolve(value);
 		};
-		const input = new HookInputComponent(title, undefined, value => settle(value), () => settle(undefined), {
-			initialValue,
-		});
+		const input = new HookInputComponent(
+			title,
+			undefined,
+			value => settle(value),
+			() => settle(undefined),
+			{
+				initialValue,
+			},
+		);
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(input);
 		this.ctx.ui.setFocus(input);
@@ -1938,10 +1964,16 @@ export class SelectorController {
 			settled = true;
 			resolve(value === undefined ? undefined : options.findIndex(option => option.label === value));
 		};
-		const selector = new HookSelectorComponent(title, [...options], value => settle(value), () => settle(undefined), {
-			disabledIndices,
-			tui: this.ctx.ui,
-		});
+		const selector = new HookSelectorComponent(
+			title,
+			[...options],
+			value => settle(value),
+			() => settle(undefined),
+			{
+				disabledIndices,
+				tui: this.ctx.ui,
+			},
+		);
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(selector);
 		this.ctx.ui.setFocus(selector);
@@ -1950,14 +1982,13 @@ export class SelectorController {
 	}
 
 	/** Provider list + row grouping for the `/logout` picker. */
-	#buildCredentialLogoutState(): {
-		providers: CredentialLogoutProvider[];
+	#buildCredentialPickerState(rows: readonly CredentialSummary[]): {
+		providers: CredentialPickerProvider[];
 		rowsByProvider: Map<string, readonly CredentialSummary[]>;
 	} {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
 		const sessionId = this.ctx.session.sessionId;
 		const { getOAuthProviders } = loadProviderAuthUi();
-		const rows = authStorage.listCredentials(undefined, sessionId);
 		const rowsByProvider = new Map<string, CredentialSummary[]>();
 		for (const row of rows) rowsByProvider.set(row.provider, [...(rowsByProvider.get(row.provider) ?? []), row]);
 
@@ -1966,11 +1997,12 @@ export class SelectorController {
 		for (const model of this.ctx.session.modelRegistry.getAvailable("all")) known.add(model.provider);
 		for (const info of oauthProviders) known.add(info.storeCredentialsAs ?? info.id);
 
-		const providers: CredentialLogoutProvider[] = [];
+		const providers: CredentialPickerProvider[] = [];
 		for (const id of [...known].sort(
 			(a, b) => Number(rowsByProvider.has(b)) - Number(rowsByProvider.has(a)) || a.localeCompare(b),
 		)) {
-			const name = oauthProviders.find(candidate => (candidate.storeCredentialsAs ?? candidate.id) === id)?.name ?? id;
+			const name =
+				oauthProviders.find(candidate => (candidate.storeCredentialsAs ?? candidate.id) === id)?.name ?? id;
 			const own = rowsByProvider.get(id);
 			if (own && own.length > 0) {
 				const oauth = own.filter(row => row.kind === "oauth").length;
@@ -2002,27 +2034,20 @@ export class SelectorController {
 		return { providers, rowsByProvider };
 	}
 
-	async #handleCredentialLogoutTarget(target: CredentialLogoutTarget): Promise<void> {
+	async #handleCredentialLogoutTarget(target: CredentialPickerTarget): Promise<void> {
+		if (target.kind !== "row") return;
 		try {
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
 			const sessionId = this.ctx.session.sessionId;
-			let removedName: string;
-			let anyPinned: boolean;
-			if (target.kind === "row") {
-				const removed = await authStorage.removeCredential(target.provider, target.row.id, { sessionId });
-				if (!removed) {
-					this.ctx.showError(
-						`Logout skipped: ${credentialName(target.row)} is no longer stored for ${target.provider}.`,
-					);
-					return;
-				}
-				removedName = `${credentialName(target.row)} (#${target.row.id})`;
-				anyPinned = target.row.pinned;
-			} else {
-				await authStorage.remove(target.provider, { sessionId });
-				removedName = `all ${target.rows.length} credentials`;
-				anyPinned = target.rows.some(row => row.pinned);
+			const removed = await authStorage.removeCredential(target.provider, target.row.id, { sessionId });
+			if (!removed) {
+				this.ctx.showError(
+					`Logout skipped: ${credentialName(target.row)} is no longer stored for ${target.provider}.`,
+				);
+				return;
 			}
+			const removedName = `${credentialName(target.row)} (#${target.row.id})`;
+			const anyPinned = target.row.pinned;
 
 			// Provider-scoped online refresh so the removed credential's stale
 			// endpoint/deployment models are invalidated deterministically; the
@@ -2074,11 +2099,12 @@ export class SelectorController {
 			);
 			return;
 		}
-		const { providers, rowsByProvider } = this.#buildCredentialLogoutState();
+		const rows = authStorage.listCredentials(undefined, this.ctx.session.sessionId);
+		const { providers, rowsByProvider } = this.#buildCredentialPickerState(rows);
 
 		if (providerId) {
-			const rows = rowsByProvider.get(providerId);
-			if (!rows || rows.length === 0) {
+			const providerRows = rowsByProvider.get(providerId);
+			if (!providerRows || providerRows.length === 0) {
 				const known = providers.some(entry => entry.id === providerId);
 				if (!known) {
 					this.ctx.showWarning(`Unknown provider: ${providerId}`);
@@ -2092,27 +2118,116 @@ export class SelectorController {
 		}
 
 		this.showSelector(done => {
-			const { CredentialLogoutComponent } = loadProviderAuthUi();
-			const selector = new CredentialLogoutComponent(
+			const { CredentialPickerComponent } = loadProviderAuthUi();
+			const picker = new CredentialPickerComponent({
+				verb: "Log out",
 				providers,
 				rowsByProvider,
-				providerId,
-				target => {
+				initialProvider: providerId,
+				confirm: {
+					heading: (provider, row) => `Log out ${credentialName(row)} (#${row.id}) from ${provider}?`,
+					actLabel: row => `Remove ${credentialName(row)} (#${row.id})`,
+				},
+				onPick: target => {
 					done();
 					void this.#handleCredentialLogoutTarget(target);
 				},
-				() => {
+				onCancel: () => {
 					done();
 					this.ctx.ui.requestRender();
 				},
-			);
-			return { component: selector, focus: selector };
+			});
+			return { component: picker, focus: picker };
 		});
+	}
+
+	/** Provider → credential picker. Undefined on Esc. A step with one choice is skipped. */
+	async pickCredential(options: {
+		verb: string;
+		rows: readonly CredentialSummary[];
+		newItem?: { label: string; description: string };
+		initialProvider?: string;
+		lockProvider?: boolean;
+	}): Promise<CredentialPickerTarget | undefined> {
+		const { verb, rows, newItem } = options;
+		if (rows.length === 0) return undefined;
+
+		const rowsByProvider = new Map<string, CredentialSummary[]>();
+		for (const row of rows) rowsByProvider.set(row.provider, [...(rowsByProvider.get(row.provider) ?? []), row]);
+		const providerIds = [...rowsByProvider.keys()].sort((a, b) => a.localeCompare(b));
+		const singleProvider = providerIds.length === 1 ? providerIds[0] : undefined;
+
+		if (singleProvider && !newItem) {
+			const providerRows = rowsByProvider.get(singleProvider) ?? [];
+			if (providerRows.length === 1) return { kind: "row", provider: singleProvider, row: providerRows[0] };
+		}
+
+		const { getOAuthProviders, CredentialPickerComponent } = loadProviderAuthUi();
+		const oauthProviders = getOAuthProviders();
+		const providers: CredentialPickerProvider[] = providerIds.map(id => {
+			const name =
+				oauthProviders.find(candidate => (candidate.storeCredentialsAs ?? candidate.id) === id)?.name ?? id;
+			const own = rowsByProvider.get(id) ?? [];
+			const oauth = own.filter(row => row.kind === "oauth").length;
+			const keys = own.length - oauth;
+			const disabled = own.filter(row => row.disabled).length;
+			const summary = [
+				oauth > 0 ? `${oauth} subscription${oauth === 1 ? "" : "s"}` : "",
+				keys > 0 ? `${keys} API key${keys === 1 ? "" : "s"}` : "",
+				disabled > 0 ? `${disabled} disabled` : "",
+			]
+				.filter(Boolean)
+				.join(" · ");
+			return { id, name, summary, disabled: false };
+		});
+
+		const { promise, resolve } = Promise.withResolvers<CredentialPickerTarget | undefined>();
+		this.showSelector(done => {
+			const picker = new CredentialPickerComponent({
+				verb,
+				providers,
+				rowsByProvider,
+				initialProvider: options.initialProvider ?? singleProvider,
+				lockProvider: options.lockProvider ?? singleProvider !== undefined,
+				newItem,
+				onPick: target => {
+					done();
+					resolve(target);
+				},
+				onCancel: () => {
+					done();
+					this.ctx.ui.requestRender();
+					resolve(undefined);
+				},
+			});
+			return { component: picker, focus: picker };
+		});
+		return promise;
+	}
+
+	/** List `providerId`'s OAuth rows and ask whether to add a new one or re-login as an existing row, before running the flow. */
+	async #loginWithCredentialPicker(providerId: string): Promise<boolean> {
+		const { getOAuthProviders } = loadProviderAuthUi();
+		const info = getOAuthProviders().find(candidate => candidate.id === providerId);
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const sessionId = this.ctx.session.sessionId;
+		const rows = authStorage
+			.listCredentials(info?.storeCredentialsAs ?? providerId, sessionId)
+			.filter(row => row.kind === "oauth");
+		if (rows.length === 0) return this.#handleOAuthLogin(providerId);
+		const target = await this.pickCredential({
+			verb: "Log in",
+			rows,
+			newItem: { label: "Add a new account", description: "Sign in with an account omp does not store yet" },
+			lockProvider: true,
+		});
+		if (!target) return false;
+		return this.#handleOAuthLogin(providerId, target.kind === "row" ? target.row.id : undefined);
 	}
 
 	async showOAuthSelector(providerId?: string): Promise<void> {
 		if (providerId) {
-			await this.#handleOAuthLogin(providerId);
+			await this.#loginWithCredentialPicker(providerId);
 			return;
 		}
 
@@ -2123,7 +2238,7 @@ export class SelectorController {
 				async (selectedProviderId: string) => {
 					selector.stopValidation();
 					done();
-					await this.#handleOAuthLogin(selectedProviderId);
+					await this.#loginWithCredentialPicker(selectedProviderId);
 				},
 				() => {
 					selector.stopValidation();

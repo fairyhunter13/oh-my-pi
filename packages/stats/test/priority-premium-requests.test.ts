@@ -4,11 +4,31 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, getOverallStats, getRecentRequests } from "@oh-my-pi/omp-stats/db";
+import type { StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-priority-");
+
+const OPENAI_CREDENTIAL: StatsCredential = { provider: "openai", credentialId: null };
+const OPENAI_CODEX_CREDENTIAL: StatsCredential = { provider: "openai-codex", credentialId: null };
+const ANTHROPIC_CREDENTIAL: StatsCredential = { provider: "anthropic", credentialId: null };
+const GITHUB_COPILOT_CREDENTIAL: StatsCredential = { provider: "github-copilot", credentialId: null };
+
+/** Sum overall stats across several providers' credentials, for a fixture that spans more than one. */
+function sumOverall(credentials: StatsCredential[]): { totalRequests: number; totalPremiumRequests: number } {
+	return credentials.reduce(
+		(acc, credential) => {
+			const stats = getOverallStats(credential);
+			return {
+				totalRequests: acc.totalRequests + stats.totalRequests,
+				totalPremiumRequests: acc.totalPremiumRequests + stats.totalPremiumRequests,
+			};
+		},
+		{ totalRequests: 0, totalPremiumRequests: 0 },
+	);
+}
 
 interface SessionLines {
 	lines: Array<Record<string, unknown>>;
@@ -75,7 +95,7 @@ describe("priority service-tier premium-request backfill", () => {
 
 		await syncAllSessions();
 
-		const overall = await getOverallStats();
+		const overall = sumOverall([OPENAI_CREDENTIAL, OPENAI_CODEX_CREDENTIAL, ANTHROPIC_CREDENTIAL]);
 		expect(overall.totalRequests).toBe(4);
 		expect(overall.totalPremiumRequests).toBe(3);
 	});
@@ -91,7 +111,7 @@ describe("priority service-tier premium-request backfill", () => {
 
 		await syncAllSessions();
 
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(GITHUB_COPILOT_CREDENTIAL, 1)[0];
 		expect(request?.usage.premiumRequests).toBeCloseTo(0.33, 6);
 	});
 
@@ -163,7 +183,7 @@ describe("priority service-tier premium-request backfill", () => {
 		// stale row in place.
 		await syncAllSessions();
 
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(OPENAI_CREDENTIAL, 1)[0];
 		expect(request?.entryId).toBe("c1");
 		expect(request?.usage.premiumRequests).toBe(1);
 	});

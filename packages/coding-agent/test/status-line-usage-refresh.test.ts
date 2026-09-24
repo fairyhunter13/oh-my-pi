@@ -19,8 +19,8 @@ function makeSession(fetchUsageReports: (signal?: AbortSignal) => Promise<unknow
 	return {
 		fetchUsageReports,
 		messages,
-		state: { messages, model: { contextWindow: 200_000 } },
-		model: { contextWindow: 200_000 },
+		state: { messages, model: { contextWindow: 200_000, provider: "anthropic" } },
+		model: { contextWindow: 200_000, provider: "anthropic" },
 		isStreaming: false,
 		sessionManager: {
 			getUsageStatistics: () => ({

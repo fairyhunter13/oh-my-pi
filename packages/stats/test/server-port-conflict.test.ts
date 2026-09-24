@@ -84,7 +84,7 @@ describe("startServer access", () => {
 
 		try {
 			expect(server.hostname).toBe(STATS_DASHBOARD_HOSTNAME);
-			const response = await fetch(`http://${server.hostname}:${server.port}/api/stats/models`);
+			const response = await fetch(`http://${server.hostname}:${server.port}/api/stats/ping`);
 			expect(response.status).toBe(200);
 			expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
 			expect(response.headers.get(STATS_DASHBOARD_HOSTNAME_HEADER)).toBe(STATS_DASHBOARD_HOSTNAME);
@@ -109,7 +109,7 @@ describe("startServer access", () => {
 			expect(server.hostname).toBe("0.0.0.0");
 			expect(await tcpConnects(nonLoopbackHostname, server.port)).toBe(true);
 
-			const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${server.port}/api/stats/models`);
+			const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${server.port}/api/stats/ping`);
 			expect(response.status).toBe(200);
 			expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
 			expect(response.headers.get(STATS_DASHBOARD_HOSTNAME_HEADER)).toBe("0.0.0.0");
@@ -145,7 +145,7 @@ describe("startServer port conflicts", () => {
 			port: 0,
 			hostname: STATS_DASHBOARD_HOSTNAME,
 			fetch: request =>
-				new URL(request.url).pathname === "/api/stats/models"
+				new URL(request.url).pathname === "/api/stats/ping"
 					? Response.json([], {
 							headers: {
 								[STATS_DASHBOARD_HEADER]: STATS_DASHBOARD_SECURITY_VERSION,
@@ -161,7 +161,7 @@ describe("startServer port conflicts", () => {
 			server.stop();
 
 			// The existing dashboard is untouched: it still answers on the port.
-			const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${existing.port}/api/stats/models`);
+			const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${existing.port}/api/stats/ping`);
 			expect(response.status).toBe(200);
 			expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
 			await response.body?.cancel();
@@ -193,7 +193,7 @@ describe("startServer port conflicts", () => {
 
 			try {
 				expect(await holder.child.exited).not.toBe(0);
-				const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${server.port}/api/stats/models`);
+				const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${server.port}/api/stats/ping`);
 				expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
 				expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
 				await response.body?.cancel();
@@ -218,7 +218,7 @@ describe("startServer port conflicts", () => {
 
 		await expect(startServer(holder.port)).rejects.toThrow("not identifiable as an omp stats dashboard");
 		expect(holder.child.exitCode).toBeNull();
-		const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${holder.port}/api/stats/models`);
+		const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${holder.port}/api/stats/ping`);
 		expect(await response.json()).toEqual({ app: "spa" });
 	});
 

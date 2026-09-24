@@ -11,12 +11,35 @@ import {
 	initDb,
 	insertMessageStats,
 } from "@oh-my-pi/omp-stats/db";
-import type { MessageStats } from "@oh-my-pi/omp-stats/types";
+import type { MessageStats, StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-db-");
+
+const CODEX_CREDENTIAL: StatsCredential = { provider: "openai-codex", credentialId: null };
+const XAI_CREDENTIAL: StatsCredential = { provider: "xai-oauth", credentialId: null };
+const DEEPSEEK_CREDENTIAL: StatsCredential = { provider: "deepseek", credentialId: null };
+const ANTHROPIC_CREDENTIAL: StatsCredential = { provider: "anthropic", credentialId: null };
+
+/** Sum an aggregate across several providers' credentials, for a test scenario that spans more than one. */
+function sumOverall(credentials: StatsCredential[]) {
+	const parts = credentials.map(c => getOverallStats(c));
+	return {
+		totalRequests: parts.reduce((sum, p) => sum + p.totalRequests, 0),
+		unpricedRequests: parts.reduce((sum, p) => sum + p.unpricedRequests, 0),
+		totalCost: parts.reduce((sum, p) => sum + p.totalCost, 0),
+	};
+}
+
+function combineRecentRequests(credentials: StatsCredential[], limit: number): MessageStats[] {
+	return credentials.flatMap(c => getRecentRequests(c, limit));
+}
+
+function combineCostTimeSeries(credentials: StatsCredential[], days: number, cutoff: number | null) {
+	return credentials.flatMap(c => getCostTimeSeries(c, days, cutoff));
+}
 
 function selectCodexReferenceModel() {
 	const model = getBundledModels("openai")
@@ -47,6 +70,7 @@ function selectFreeModel() {
 }
 
 const freeModel = selectFreeModel();
+const FREE_MODEL_CREDENTIAL: StatsCredential = { provider: freeModel.provider, credentialId: null };
 
 function createCodexGptStats(entryId: string): MessageStats {
 	return {
@@ -142,7 +166,7 @@ describe("stats subscription cost correction", () => {
 		insertMessageStats([createCodexGptStats("inserted")]);
 
 		const expected = expectedCodexGptCost();
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(CODEX_CREDENTIAL, 1)[0];
 		expect(expected.total).toBeGreaterThan(0);
 		expect(request?.usage.cost.input).toBeCloseTo(expected.input, 8);
 		expect(request?.usage.cost.output).toBeCloseTo(expected.output, 8);
@@ -156,7 +180,7 @@ describe("stats subscription cost correction", () => {
 		insertMessageStats([createXaiOAuthStats("xai-inserted")]);
 
 		const expected = expectedXaiGrokCost();
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(XAI_CREDENTIAL, 1)[0];
 		expect(expected.total).toBeGreaterThan(0);
 		expect(request?.usage.cost.input).toBeCloseTo(expected.input, 8);
 		expect(request?.usage.cost.output).toBeCloseTo(expected.output, 8);
@@ -178,7 +202,7 @@ describe("stats subscription cost correction", () => {
 
 		insertMessageStats([stats]);
 
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(XAI_CREDENTIAL, 1)[0];
 		expect(request?.usage.cost.input).toBeCloseTo(0.4, 8);
 		expect(request?.usage.cost.output).toBeCloseTo(0.012, 8);
 		expect(request?.usage.cost.cacheRead).toBeCloseTo(0.1, 8);
@@ -192,10 +216,10 @@ describe("stats subscription cost correction", () => {
 
 		insertMessageStats([stats]);
 
-		expect(getRecentRequests(1)[0]?.usage.cost.total).toBe(0);
-		expect(getStatsByModel()[0]).toMatchObject({ totalCost: 0, unpricedRequests: 1 });
-		expect(getStatsByProvider()[0]).toMatchObject({ totalCost: 0, unpricedRequests: 1 });
-		expect(getCostTimeSeries()[0]).toMatchObject({ cost: 0, unpricedRequests: 1 });
+		expect(getRecentRequests(XAI_CREDENTIAL, 1)[0]?.usage.cost.total).toBe(0);
+		expect(getStatsByModel(XAI_CREDENTIAL)[0]).toMatchObject({ totalCost: 0, unpricedRequests: 1 });
+		expect(getStatsByProvider(XAI_CREDENTIAL)[0]).toMatchObject({ totalCost: 0, unpricedRequests: 1 });
+		expect(getCostTimeSeries(XAI_CREDENTIAL)[0]).toMatchObject({ cost: 0, unpricedRequests: 1 });
 	});
 
 	it("backfills existing zero-cost subscription rows on database init", async () => {
@@ -263,7 +287,7 @@ describe("stats subscription cost correction", () => {
 
 		await initDb();
 
-		const requests = getRecentRequests(2);
+		const requests = combineRecentRequests([CODEX_CREDENTIAL, XAI_CREDENTIAL], 2);
 		expect(requests.find(request => request.entryId === "codex-backfilled")?.usage.cost.total).toBeCloseTo(
 			expectedCodexGptCost().total,
 			8,
@@ -340,7 +364,7 @@ describe("stats subscription cost correction", () => {
 		// Prompt input (1000 + 200 + 300000) crosses the inclusive 200K tier, so
 		// the whole request bills at 4/12/0.4; orchestration input/output are
 		// priced alongside the conversation buckets.
-		const request = getRecentRequests(1)[0];
+		const request = getRecentRequests(XAI_CREDENTIAL, 1)[0];
 		expect(request?.usage.cost.input).toBeCloseTo((4 / 1e6) * 301_000, 8);
 		expect(request?.usage.cost.output).toBeCloseTo((12 / 1e6) * 1_500, 8);
 		expect(request?.usage.cost.cacheRead).toBeCloseTo((0.4 / 1e6) * 200, 8);
@@ -374,19 +398,19 @@ describe("stats scheduled response costs", () => {
 			return stats;
 		});
 		insertMessageStats(requests);
-		const stored = getRecentRequests(3);
+		const stored = getRecentRequests(DEEPSEEK_CREDENTIAL, 3);
 		expect(stored.find(request => request.entryId === "peak")?.usage.cost.total).toBeCloseTo(0.044, 8);
 		expect(stored.find(request => request.entryId === "off-peak")?.usage.cost.total).toBeCloseTo(0.022, 8);
 		expect(stored.find(request => request.entryId === "new-rate")?.usage.cost.total).toBeCloseTo(0.003, 8);
-		expect(getOverallStats().totalCost).toBeCloseTo(0.069, 8);
-		expect(getOverallStats().cacheSavings).toBeCloseTo(1 - 0.069 / 2.13, 8);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBeCloseTo(0.069, 8);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).cacheSavings).toBeCloseTo(1 - 0.069 / 2.13, 8);
 
 		// Simulate a database predating the no-cache estimate column's backfill.
 		database.run("UPDATE messages SET cost_no_cache_input = NULL");
 		closeDb();
 		await initDb();
-		expect(getOverallStats().totalCost).toBeCloseTo(0.069, 8);
-		expect(getOverallStats().cacheSavings).toBeCloseTo(1 - 0.069 / 2.13, 8);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBeCloseTo(0.069, 8);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).cacheSavings).toBeCloseTo(1 - 0.069 / 2.13, 8);
 	});
 
 	it("reports a scheduled request with no recoverable timestamp as unpriced, not free", async () => {
@@ -466,7 +490,8 @@ describe("stats scheduled response costs", () => {
 
 		insertMessageStats([undated, free, freeFlat, recordedZero, priced]);
 
-		const stored = getRecentRequests(5);
+		const scheduledCredentials = [DEEPSEEK_CREDENTIAL, FREE_MODEL_CREDENTIAL, ANTHROPIC_CREDENTIAL];
+		const stored = combineRecentRequests(scheduledCredentials, 5);
 		expect(stored.find(request => request.entryId === "undated-scheduled")?.usage.cost.total).toBe(0);
 		expect(stored.find(request => request.entryId === "undated-scheduled")?.costUnpriced).toBe(true);
 		expect(stored.find(request => request.entryId === "dated-explicit-zero")?.usage.cost.total).toBe(0);
@@ -477,22 +502,24 @@ describe("stats scheduled response costs", () => {
 		expect(stored.find(request => request.entryId === "undated-recorded-zero")?.costUnpriced).toBe(false);
 		expect(stored.find(request => request.entryId === "priced")?.usage.cost.total).toBeCloseTo(1.25, 8);
 
-		expect(getOverallStats()).toMatchObject({ unpricedRequests: 1, totalRequests: 5 });
-		expect(getOverallStats().totalCost).toBeCloseTo(1.25, 8);
-		expect(getStatsByModel().find(model => model.model === "deepseek-v4-flash")).toMatchObject({
+		expect(sumOverall(scheduledCredentials)).toMatchObject({ unpricedRequests: 1, totalRequests: 5 });
+		expect(sumOverall(scheduledCredentials).totalCost).toBeCloseTo(1.25, 8);
+		expect(getStatsByModel(DEEPSEEK_CREDENTIAL).find(model => model.model === "deepseek-v4-flash")).toMatchObject({
 			totalCost: 0,
 			unpricedRequests: 1,
 		});
-		expect(getStatsByModel().find(model => model.model === freeModel.id)).toMatchObject({
+		expect(getStatsByModel(FREE_MODEL_CREDENTIAL).find(model => model.model === freeModel.id)).toMatchObject({
 			totalCost: 0,
 			unpricedRequests: 0,
 		});
-		expect(getStatsByProvider().find(provider => provider.provider === "anthropic")).toMatchObject({
+		expect(
+			getStatsByProvider(ANTHROPIC_CREDENTIAL).find(provider => provider.provider === "anthropic"),
+		).toMatchObject({
 			totalCost: 1.25,
 			unpricedRequests: 0,
 		});
 		// The undated rows bucket at the epoch, so ask for the uncut series.
-		const series = getCostTimeSeries(90, null);
+		const series = combineCostTimeSeries(scheduledCredentials, 90, null);
 		expect(series.reduce((sum, point) => sum + point.unpricedRequests, 0)).toBe(1);
 		expect(series.reduce((sum, point) => sum + point.cost, 0)).toBeCloseTo(1.25, 8);
 		// The Traces session list reads the same marker through the rollup.
@@ -500,9 +527,15 @@ describe("stats scheduled response costs", () => {
 
 		closeDb();
 		await initDb();
-		expect(getOverallStats()).toMatchObject({ unpricedRequests: 1, totalCost: 1.25 });
-		expect(getRecentRequests(5).find(request => request.entryId === "undated-scheduled")?.costUnpriced).toBe(true);
-		expect(getRecentRequests(5).find(request => request.entryId === "undated-free-flat")?.costUnpriced).toBe(false);
+		expect(sumOverall(scheduledCredentials)).toMatchObject({ unpricedRequests: 1, totalCost: 1.25 });
+		expect(
+			combineRecentRequests(scheduledCredentials, 5).find(request => request.entryId === "undated-scheduled")
+				?.costUnpriced,
+		).toBe(true);
+		expect(
+			combineRecentRequests(scheduledCredentials, 5).find(request => request.entryId === "undated-free-flat")
+				?.costUnpriced,
+		).toBe(false);
 	});
 
 	it("preserves recorded scheduled charges, including explicit zero, on ingest and reopen", async () => {
@@ -517,12 +550,16 @@ describe("stats scheduled response costs", () => {
 			return stats;
 		});
 		insertMessageStats(requests);
-		expect(getOverallStats().totalCost).toBeCloseTo(2.25, 8);
-		expect(getRecentRequests(3).find(request => request.entryId === "recorded-0")?.usage.cost.total).toBe(0);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBeCloseTo(2.25, 8);
+		expect(
+			getRecentRequests(DEEPSEEK_CREDENTIAL, 3).find(request => request.entryId === "recorded-0")?.usage.cost.total,
+		).toBe(0);
 		closeDb();
 		await initDb();
-		expect(getOverallStats().totalCost).toBeCloseTo(2.25, 8);
-		expect(getRecentRequests(3).find(request => request.entryId === "recorded-0")?.usage.cost.total).toBe(0);
+		expect(getOverallStats(DEEPSEEK_CREDENTIAL).totalCost).toBeCloseTo(2.25, 8);
+		expect(
+			getRecentRequests(DEEPSEEK_CREDENTIAL, 3).find(request => request.entryId === "recorded-0")?.usage.cost.total,
+		).toBe(0);
 	});
 });
 
@@ -533,15 +570,15 @@ describe("stats cache metrics", () => {
 
 		// 100 uncached + 800 reads at 0.1x + 100 writes at 1.25x = 305,
 		// versus 1,000 tokens at the uncached input rate.
-		expect(getOverallStats().cacheSavings).toBeCloseTo(0.695, 8);
-		expect(getOverallStats().cacheRate).toBeCloseTo(800 / 900, 8);
+		expect(getOverallStats(ANTHROPIC_CREDENTIAL).cacheSavings).toBeCloseTo(0.695, 8);
+		expect(getOverallStats(ANTHROPIC_CREDENTIAL).cacheRate).toBeCloseTo(800 / 900, 8);
 	});
 
 	it("reports cache writes without reads as negative savings", async () => {
 		await initDb();
 		insertMessageStats([createAnthropicCacheStats("cache-write", 0, 1_000)]);
 
-		expect(getOverallStats().cacheSavings).toBeCloseTo(-0.25, 8);
+		expect(getOverallStats(ANTHROPIC_CREDENTIAL).cacheSavings).toBeCloseTo(-0.25, 8);
 	});
 
 	it("charges 1-hour cache writes at their full overhead", async () => {
@@ -556,15 +593,16 @@ describe("stats cache metrics", () => {
 		};
 		insertMessageStats([stats]);
 
-		expect(getOverallStats().cacheSavings).toBeCloseTo(-1, 8);
+		expect(getOverallStats(ANTHROPIC_CREDENTIAL).cacheSavings).toBeCloseTo(-1, 8);
 	});
 
-	it("excludes unpriced custom models from the savings ratio", async () => {
+	it("excludes an unpriced custom model from the same provider's savings ratio", async () => {
 		await initDb();
 		const known = createAnthropicCacheStats("known", 800, 100);
+		// Same provider as `known`: a credential's query can never mix providers,
+		// so the model that must not corrupt the ratio has to share it.
 		const unpriced = createAnthropicCacheStats("unpriced", 0, 0);
-		unpriced.provider = "custom";
-		unpriced.model = "custom-model";
+		unpriced.model = "custom-model-with-no-catalog-entry";
 		unpriced.usage.cost = {
 			input: 1,
 			output: 0,
@@ -574,6 +612,6 @@ describe("stats cache metrics", () => {
 		};
 		insertMessageStats([known, unpriced]);
 
-		expect(getOverallStats().cacheSavings).toBeCloseTo(0.695, 8);
+		expect(getOverallStats(ANTHROPIC_CREDENTIAL).cacheSavings).toBeCloseTo(0.695, 8);
 	});
 });

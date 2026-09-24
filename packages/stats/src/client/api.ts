@@ -16,6 +16,21 @@ import type {
 
 const API_BASE = "/api";
 
+/** One `GET /api/credentials` row: a stored row, or the provider's unattributed bucket. */
+export interface CredentialListEntry {
+	provider: string;
+	credentialId: number | null;
+	requests: number;
+	lastSeen: number;
+	label: string;
+	/** `formatStatsCredential` value: the `credential` query param every other route wants. */
+	id: string;
+}
+
+export async function getCredentials(signal?: AbortSignal): Promise<CredentialListEntry[]> {
+	return fetchJson<CredentialListEntry[]>(`${API_BASE}/credentials`, { signal });
+}
+
 export class ApiError extends Error {
 	status: number;
 	endpoint: string;
@@ -36,40 +51,56 @@ async function fetchJson<T>(endpoint: string, options?: RequestInit): Promise<T>
 	return res.json() as Promise<T>;
 }
 
-export async function getOverviewStats(range: TimeRange = "24h", signal?: AbortSignal): Promise<OverviewStats> {
-	return fetchJson<OverviewStats>(`${API_BASE}/stats/overview?range=${encodeURIComponent(range)}`, {
-		signal,
-	});
+export async function getOverviewStats(
+	range: TimeRange = "24h",
+	credential: string,
+	signal?: AbortSignal,
+): Promise<OverviewStats> {
+	return fetchJson<OverviewStats>(
+		`${API_BASE}/stats/overview?range=${encodeURIComponent(range)}&credential=${encodeURIComponent(credential)}`,
+		{ signal },
+	);
 }
 
 export async function getModelDashboardStats(
 	range: TimeRange = "24h",
+	credential: string,
 	signal?: AbortSignal,
 ): Promise<ModelDashboardStats> {
-	return fetchJson<ModelDashboardStats>(`${API_BASE}/stats/model-dashboard?range=${encodeURIComponent(range)}`, {
-		signal,
-	});
+	return fetchJson<ModelDashboardStats>(
+		`${API_BASE}/stats/model-dashboard?range=${encodeURIComponent(range)}&credential=${encodeURIComponent(credential)}`,
+		{ signal },
+	);
 }
 
 export async function getCostDashboardStats(
 	range: TimeRange = "24h",
+	credential: string,
 	signal?: AbortSignal,
 ): Promise<CostDashboardStats> {
-	return fetchJson<CostDashboardStats>(`${API_BASE}/stats/costs?range=${encodeURIComponent(range)}`, { signal });
+	return fetchJson<CostDashboardStats>(
+		`${API_BASE}/stats/costs?range=${encodeURIComponent(range)}&credential=${encodeURIComponent(credential)}`,
+		{ signal },
+	);
 }
 
-export async function getRecentRequests(limit = 50, signal?: AbortSignal): Promise<MessageStats[]> {
-	return fetchJson<MessageStats[]>(`${API_BASE}/stats/recent?limit=${limit}`, { signal });
+export async function getRecentRequests(limit = 50, credential: string, signal?: AbortSignal): Promise<MessageStats[]> {
+	return fetchJson<MessageStats[]>(
+		`${API_BASE}/stats/recent?limit=${limit}&credential=${encodeURIComponent(credential)}`,
+		{ signal },
+	);
 }
 
 export async function getRecentErrors(
 	range: TimeRange = "24h",
 	limit = 50,
+	credential: string,
 	signal?: AbortSignal,
 ): Promise<MessageStats[]> {
-	return fetchJson<MessageStats[]>(`${API_BASE}/stats/errors?range=${encodeURIComponent(range)}&limit=${limit}`, {
-		signal,
-	});
+	return fetchJson<MessageStats[]>(
+		`${API_BASE}/stats/errors?range=${encodeURIComponent(range)}&limit=${limit}&credential=${encodeURIComponent(credential)}`,
+		{ signal },
+	);
 }
 
 export async function getRequestDetails(id: number, signal?: AbortSignal): Promise<RequestDetails> {
@@ -89,8 +120,15 @@ export async function getBehaviorDashboardStats(
 	});
 }
 
-export async function getFolderStats(range: TimeRange = "24h", signal?: AbortSignal): Promise<FolderStats[]> {
-	return fetchJson<FolderStats[]>(`${API_BASE}/stats/folders?range=${encodeURIComponent(range)}`, { signal });
+export async function getFolderStats(
+	range: TimeRange = "24h",
+	credential: string,
+	signal?: AbortSignal,
+): Promise<FolderStats[]> {
+	return fetchJson<FolderStats[]>(
+		`${API_BASE}/stats/folders?range=${encodeURIComponent(range)}&credential=${encodeURIComponent(credential)}`,
+		{ signal },
+	);
 }
 
 export async function getGainDashboardStats(
@@ -112,11 +150,13 @@ export async function getToolDashboardStats(
 
 export async function getProviderDashboardStats(
 	range: TimeRange = "24h",
+	credential: string,
 	signal?: AbortSignal,
 ): Promise<ProviderDashboardStats> {
-	return fetchJson<ProviderDashboardStats>(`${API_BASE}/stats/providers?range=${encodeURIComponent(range)}`, {
-		signal,
-	});
+	return fetchJson<ProviderDashboardStats>(
+		`${API_BASE}/stats/providers?range=${encodeURIComponent(range)}&credential=${encodeURIComponent(credential)}`,
+		{ signal },
+	);
 }
 export async function getSessions(limit = 100, q?: string, signal?: AbortSignal): Promise<SessionSummary[]> {
 	const params = new URLSearchParams({ limit: String(limit) });

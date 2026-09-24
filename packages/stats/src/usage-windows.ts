@@ -16,7 +16,7 @@ import { Database } from "bun:sqlite";
 import { AuthBrokerClient, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
-import type { ProviderWindowInsight, UsageWindowPoint, UsageWindowSeries } from "./shared-types";
+import type { ProviderWindowInsight, StatsCredential, UsageWindowPoint, UsageWindowSeries } from "./shared-types";
 
 /** Subset of a `usage_history` row consumed by the window analytics. */
 export interface UsageSnapshotRow {
@@ -122,14 +122,14 @@ export function readUsageSnapshots(sinceMs: number, dbPath = getAgentDbPath()): 
  * errors fall back to the local read so the dashboard degrades to
  * stale-but-present data instead of failing.
  */
-export async function fetchUsageData(sinceMs: number): Promise<UsageDataSnapshot> {
+export async function fetchUsageData(sinceMs: number, credential: StatsCredential): Promise<UsageDataSnapshot> {
 	try {
 		const brokerConfig = await resolveAuthBrokerConfig();
 		if (brokerConfig) {
 			const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 			const [response, fleetTokensByProvider] = await Promise.all([
 				client.fetchUsageHistory({ sinceMs }),
-				fetchFleetTokens(client, sinceMs),
+				fetchFleetTokens(client, sinceMs, credential),
 			]);
 			return {
 				rows: response.entries.map(entry => ({
@@ -158,9 +158,17 @@ export async function fetchUsageData(sinceMs: number): Promise<UsageDataSnapshot
  * Returns `null` on fetch failure or when no client has reported usage, so
  * callers fall back to local message stats instead of zeroing estimates.
  */
-async function fetchFleetTokens(client: AuthBrokerClient, sinceMs: number): Promise<Map<string, number> | null> {
+async function fetchFleetTokens(
+	client: AuthBrokerClient,
+	sinceMs: number,
+	credential: StatsCredential,
+): Promise<Map<string, number> | null> {
 	try {
-		const summary = await client.fetchClientUsageSummary({ sinceMs });
+		const summary = await client.fetchClientUsageSummary({
+			sinceMs,
+			provider: credential.provider,
+			credentialId: credential.credentialId,
+		});
 		return sumFleetTokens(summary.clients);
 	} catch (err) {
 		logger.debug("broker client usage summary unavailable", { error: String(err) });

@@ -1,7 +1,8 @@
-import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import type { CredentialSummary, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import type { AuthCredential, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -159,33 +160,24 @@ function renderUsageReports(
 	return ["```", ...lines, "```"].join("\n");
 }
 
-/**
- * Build the `/usage` ACP-mode text. Prefers provider-reported limits when the
- * session exposes `fetchUsageReports`; otherwise falls back to the local
- * session-manager tallies.
- */
-export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
-	const provider = runtime.session as SlashCommandRuntime["session"] & {
-		fetchUsageReports?: () => Promise<UsageReport[] | null>;
-		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
-	};
-	if (provider.fetchUsageReports) {
-		const reports = await provider.fetchUsageReports();
-		if (reports && reports.length > 0) {
-			const currentProvider = runtime.session.model?.provider;
-			const activeAccount = currentProvider
-				? runtime.session.modelRegistry.authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
-				: undefined;
-			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
-			return renderUsageReports(
-				reports,
-				Date.now(),
-				providerId => (providerId === currentProvider ? activeAccount : undefined),
-				usageModelSelectors,
-			);
-		}
-	}
+/** The `OAuthAccountIdentity` of a stored OAuth credential row, or `undefined` for an API key. */
+function identityOfStoredCredential(
+	row: CredentialSummary,
+	stored: StoredAuthCredential | undefined,
+): OAuthAccountIdentity | undefined {
+	const credential: AuthCredential | undefined = stored?.credential;
+	if (row.kind !== "oauth" || credential?.type !== "oauth") return undefined;
+	const identity: OAuthAccountIdentity = {};
+	if (credential.accountId) identity.accountId = credential.accountId;
+	if (credential.email) identity.email = credential.email;
+	if (credential.projectId) identity.projectId = credential.projectId;
+	if (credential.orgId) identity.orgId = credential.orgId;
+	if (credential.orgName) identity.orgName = credential.orgName;
+	return Object.keys(identity).length > 0 ? identity : undefined;
+}
 
+/** Local session-manager tallies: the fallback for a session with no usage support. */
+function sessionTallyText(runtime: SlashCommandRuntime): string {
 	const stats = runtime.session.sessionManager.getUsageStatistics();
 	const orchestrationTokens = stats.orchestrationInput + stats.orchestrationOutput + stats.orchestrationCacheRead;
 	return [
@@ -199,4 +191,67 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		`Premium requests: ${stats.premiumRequests}`,
 		`Cost: $${stats.cost.toFixed(6)}`,
 	].join("\n");
+}
+
+/**
+ * Build the `/usage` ACP-mode text. With no `arg`, lists every stored
+ * credential with a usage endpoint. With `<provider>/<id|active>`, renders
+ * only that credential's report. Falls back to the local session-manager
+ * tallies for a session with no usage support at all.
+ */
+export async function buildUsageReportText(runtime: SlashCommandRuntime, arg = ""): Promise<string> {
+	const provider = runtime.session as SlashCommandRuntime["session"] & {
+		fetchUsageReports?: () => Promise<UsageReport[] | null>;
+		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
+	};
+	if (!provider.fetchUsageReports) return sessionTallyText(runtime);
+
+	const authStorage = runtime.session.modelRegistry.authStorage;
+	const sessionId = runtime.session.sessionId;
+	const rows = authStorage
+		.listCredentials(undefined, sessionId)
+		.filter(row => row.disabled === null && authStorage.usage.providerFor(row.provider) !== undefined);
+
+	const target = arg.trim();
+	if (!target) {
+		if (rows.length === 0) return sessionTallyText(runtime);
+		const lines = rows.map(
+			row => `- ${credentialName(row)} [${row.provider}/${row.id}]${row.active ? " (active)" : ""}`,
+		);
+		lines.push("", "Show one with `/usage show <provider>/<credential id>` or `/usage show <provider>/active`.");
+		return lines.join("\n");
+	}
+
+	const notFound = `No stored credential matches "${target}". List choices with \`/usage\`.`;
+	const slash = target.indexOf("/");
+	if (slash <= 0) return notFound;
+	const providerId = target.slice(0, slash);
+	const idPart = target
+		.slice(slash + 1)
+		.trim()
+		.toLowerCase();
+	const row = rows.find(candidate => {
+		if (candidate.provider !== providerId) return false;
+		if (idPart === "active") return candidate.active;
+		return /^\d+$/.test(idPart) && candidate.id === Number(idPart);
+	});
+	if (!row) return notFound;
+
+	const stored = authStorage.credentials.list(row.provider).find(entry => entry.id === row.id);
+	if (!stored) return notFound;
+
+	let report: UsageReport | null;
+	try {
+		report = await authStorage.usage.report(row.provider, stored.credential, {
+			baseUrl: runtime.session.modelRegistry.getProviderBaseUrl(row.provider),
+			signal: AbortSignal.timeout(15_000),
+		});
+	} catch (error) {
+		return `Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`;
+	}
+	if (!report) return `No usage data for ${credentialName(row)} (#${row.id}).`;
+
+	const usageModelSelectors = provider.getUsageReportingModelSelectors?.([report]) ?? [];
+	const identity = identityOfStoredCredential(row, stored);
+	return renderUsageReports([report], Date.now(), () => identity, usageModelSelectors);
 }

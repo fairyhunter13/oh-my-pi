@@ -308,11 +308,16 @@ export class AuthBrokerClient {
 		});
 	}
 
-	/** Per-client token burn aggregates recorded by the broker host. */
-	fetchClientUsageSummary(query?: { sinceMs?: number }, signal?: AbortSignal): Promise<ClientUsageSummaryResponse> {
+	/** Per-client token burn aggregates recorded by the broker host, for one credential. */
+	fetchClientUsageSummary(
+		query: { sinceMs?: number; provider: string; credentialId: number | null },
+		signal?: AbortSignal,
+	): Promise<ClientUsageSummaryResponse> {
 		const params = new URLSearchParams();
-		if (query?.sinceMs !== undefined) params.set("sinceMs", String(query.sinceMs));
-		const path = `/v1/usage/clients${params.size > 0 ? `?${params.toString()}` : ""}`;
+		if (query.sinceMs !== undefined) params.set("sinceMs", String(query.sinceMs));
+		params.set("provider", query.provider);
+		params.set("credentialId", query.credentialId === null ? "none" : String(query.credentialId));
+		const path = `/v1/usage/clients?${params.toString()}`;
 		return this.#request<ClientUsageSummaryResponse>("GET", path, {
 			schema: "clientUsageSummaryResponseSchema",
 			signal,

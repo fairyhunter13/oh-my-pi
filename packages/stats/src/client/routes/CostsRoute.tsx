@@ -17,24 +17,31 @@ import { formatCost, formatEstimatedCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildCostSummary } from "../data/view-models";
 import type { CostTimeSeriesPoint, TimeRange } from "../types";
-import { AsyncBoundary, Panel, SegmentedControl } from "../ui";
+import { AsyncBoundary, EmptyState, Panel, SegmentedControl } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
 
 export interface CostsRouteProps {
 	active: boolean;
 	range: TimeRange;
+	credential: string | null;
 	refreshTrigger: number;
 }
 
-export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
+export function CostsRoute({ active, range, credential, refreshTrigger }: CostsRouteProps) {
 	const {
 		data: costStats,
 		error,
 		loading,
-	} = useResource(["costs", range, refreshTrigger], signal => getCostDashboardStats(range, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+	} = useResource(
+		["costs", range, credential, refreshTrigger],
+		signal => getCostDashboardStats(range, credential as string, signal),
+		{
+			pollMs: 30000,
+			enabled: active && credential !== null,
+		},
+	);
+
+	if (!credential) return <EmptyState message="Pick a credential to see its numbers." />;
 
 	return (
 		<div className="stats-route-container space-y-6">

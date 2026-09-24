@@ -3,8 +3,9 @@
 import { parseArgs } from "node:util";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
-import { closeDb } from "./db";
+import { closeDb, listStatsCredentials } from "./db";
 import { formatStatsDashboardUrl, startServer } from "./server";
+import { formatStatsCredential, parseStatsCredential, type StatsCredential } from "./shared-types";
 
 export {
 	getDashboardStats,
@@ -19,6 +20,8 @@ export { closeDb } from "./db";
 export { getGainDashboardStats } from "./gain-aggregator";
 export { formatStatsDashboardUrl, startServer } from "./server";
 export type { GainDashboardStats, GainSource, GainSourceTotals, GainTimeSeriesPoint } from "./shared-types";
+export { formatStatsCredential, parseStatsCredential } from "./shared-types";
+export type { DailyActivityPoint, StatsCredential } from "./shared-types";
 export type {
 	AggregatedStats,
 	DashboardStats,
@@ -47,10 +50,32 @@ function normalizePremiumRequests(n: number): number {
 }
 
 /**
+ * Resolve the one credential the standalone CLI acts on: the `--credential`
+ * flag when given, else the sole candidate `messages` holds. With more than
+ * one candidate and no flag, print the choices and exit(2) rather than
+ * silently merging them into one view.
+ */
+function resolveStandaloneCredential(credentialArg: string | undefined): StatsCredential {
+	const parsed = parseStatsCredential(credentialArg);
+	if (parsed) return parsed;
+	if (credentialArg !== undefined) {
+		console.error(`"${credentialArg}" is not "<provider>:<id>" or "<provider>:none".`);
+		process.exit(2);
+	}
+	const candidates = listStatsCredentials();
+	if (candidates.length === 1) return candidates[0];
+	console.error("Pick a credential with --credential <provider>:<id|none>:");
+	for (const candidate of candidates) {
+		console.error(`  ${formatStatsCredential(candidate)}  (${candidate.requests} requests)`);
+	}
+	process.exit(2);
+}
+
+/**
  * Print stats summary to console.
  */
-async function printStats(): Promise<void> {
-	const stats = await getDashboardStats();
+async function printStats(credential: StatsCredential): Promise<void> {
+	const stats = await getDashboardStats(credential);
 	const { overall, byModel, byFolder } = stats;
 
 	console.log("\n=== AI Usage Statistics ===\n");
@@ -99,6 +124,7 @@ export interface StandaloneStatsArgs {
 	json: boolean;
 	sync: boolean;
 	help: boolean;
+	credential?: string;
 }
 
 /** Parse the standalone `omp-stats` arguments used by the production entry point. */
@@ -111,6 +137,7 @@ export function parseStandaloneStatsArgs(args: string[]): StandaloneStatsArgs {
 			json: { type: "boolean", short: "j", default: false },
 			sync: { type: "boolean", short: "s", default: false },
 			help: { type: "boolean", short: "h", default: false },
+			credential: { type: "string", short: "c" },
 		},
 		allowPositionals: true,
 	});
@@ -120,6 +147,7 @@ export function parseStandaloneStatsArgs(args: string[]): StandaloneStatsArgs {
 		json: values.json ?? false,
 		sync: values.sync ?? false,
 		help: values.help ?? false,
+		credential: values.credential,
 	};
 }
 
@@ -180,13 +208,15 @@ Examples:
 		console.log(`Synced ${processed} new entries from ${files} files (${total} total)\n`);
 
 		if (values.json) {
-			const stats = await getDashboardStats();
+			const credential = resolveStandaloneCredential(values.credential);
+			const stats = await getDashboardStats(credential);
 			console.log(JSON.stringify(stats, null, 2));
 			return;
 		}
 
 		if (values.sync) {
-			await printStats();
+			const credential = resolveStandaloneCredential(values.credential);
+			await printStats(credential);
 			return;
 		}
 

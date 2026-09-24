@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProviderDashboardStats } from "@oh-my-pi/omp-stats/aggregator";
 import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
-import type { MessageStats } from "@oh-my-pi/omp-stats/types";
+import type { MessageStats, StatsCredential } from "@oh-my-pi/omp-stats/types";
 import {
 	computeUsageWindowStats,
 	readUsageSnapshots,
@@ -15,6 +15,9 @@ import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-providers-");
+
+const PROV_A_CREDENTIAL: StatsCredential = { provider: "prov-a", credentialId: null };
+const PROV_B_CREDENTIAL: StatsCredential = { provider: "prov-b", credentialId: null };
 
 const T0 = Date.UTC(2026, 6, 20, 10, 0, 0);
 const MINUTE = 60_000;
@@ -338,10 +341,12 @@ describe("getProviderDashboardStats", () => {
 			snapshot({ recordedAt: T0 + MINUTE, usedFraction: 0.6 }),
 		]);
 
-		const stats = await getProviderDashboardStats("all");
+		// A credential is one provider, so prov-a and prov-b numbers come back
+		// from separate calls — never merged into one cross-provider view.
+		const statsA = await getProviderDashboardStats(PROV_A_CREDENTIAL, "all");
 
-		expect(stats.providers.map(p => p.provider)).toEqual(["prov-a", "prov-b"]);
-		const provA = stats.providers[0];
+		expect(statsA.providers.map(p => p.provider)).toEqual(["prov-a"]);
+		const provA = statsA.providers[0];
 		expect(provA.totalRequests).toBe(2);
 		expect(provA.failedRequests).toBe(1);
 		expect(provA.totalTokens).toBe(2000);
@@ -350,21 +355,24 @@ describe("getProviderDashboardStats", () => {
 		// All prov-a messages land in one hour bucket. Bun test pins JS `Date`
 		// to UTC while SQLite 'localtime' uses the OS timezone, so assert the
 		// grouping/summing contract rather than a specific hour value.
-		const provAHours = stats.hourly.filter(p => p.provider === "prov-a");
+		const provAHours = statsA.hourly.filter(p => p.provider === "prov-a");
 		expect(provAHours).toHaveLength(1);
 		expect(provAHours[0].hour).toBeGreaterThanOrEqual(0);
 		expect(provAHours[0].hour).toBeLessThan(24);
 		expect(provAHours[0].totalTokens).toBe(2000);
 		expect(provAHours[0].outputTokens).toBe(600);
 		expect(provAHours[0].requests).toBe(2);
-		expect(stats.series.some(p => p.provider === "prov-b" && p.totalTokens === 150)).toBe(true);
 
-		expect(stats.windowInsights).toHaveLength(1);
-		const insight = stats.windowInsights[0];
+		expect(statsA.windowInsights).toHaveLength(1);
+		const insight = statsA.windowInsights[0];
 		expect(insight.fractionConsumed).toBeCloseTo(0.5, 10);
 		// prov-a burned 2000 tokens over 0.5 windows → 4000 tokens per window.
 		expect(insight.estTokensPerWindow).toBe(4000);
-		expect(stats.usageSeries).toHaveLength(1);
-		expect(stats.usageSeries[0].accountLabel).toBe("acct-1");
+		expect(statsA.usageSeries).toHaveLength(1);
+		expect(statsA.usageSeries[0].accountLabel).toBe("acct-1");
+
+		const statsB = await getProviderDashboardStats(PROV_B_CREDENTIAL, "all");
+		expect(statsB.providers.map(p => p.provider)).toEqual(["prov-b"]);
+		expect(statsB.series.some(p => p.provider === "prov-b" && p.totalTokens === 150)).toBe(true);
 	});
 });

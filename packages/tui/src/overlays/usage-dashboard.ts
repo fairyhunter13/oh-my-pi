@@ -19,12 +19,7 @@ import {
 } from "../index";
 import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../chrome/format";
-import {
-	collapseSharedUsageReports,
-	formatLimitTitle,
-	summarizeUsageResetCredits,
-	type UsageResetSummary,
-} from "./usage-display";
+import { collapseSharedUsageReports, formatLimitTitle, summarizeUsageResetCredits } from "./usage-display";
 import { colorToAnsi } from "../theme/color";
 import { ensureThemeSync, theme } from "../theme/theme";
 import { formatAbsoluteOnlyAmount } from "../prompt/usage-amounts";
@@ -65,15 +60,13 @@ export interface CardWindowRow {
 	usedText?: string;
 }
 
-/** Compact per-provider summary backing one card in the subscriptions grid. */
-export interface ProviderCard {
+/** Compact summary of one credential's usage, backing the one card the dashboard shows. */
+export interface CredentialCard {
 	provider: string;
 	name: string;
-	/** Number of accounts reporting for this provider. */
-	accounts: number;
 	/** Window rows sorted most-pressing first. */
 	windows: CardWindowRow[];
-	/** True when every account reports no limits (e.g. enterprise plans). */
+	/** True when this credential reports no limits (e.g. an enterprise plan). */
 	unlimited: boolean;
 	/** True when nothing is used anywhere (or there are no limits): collapses to a tick. */
 	idle: boolean;
@@ -83,23 +76,8 @@ export interface ProviderCard {
 		soonestExpiryMs?: number;
 		unavailableReasons: string[];
 	};
-	/** Labels of accounts with verified Daybreak access. */
-	daybreakAccounts?: string[];
-}
-
-/**
- * Aggregate status across a bucket's limits, mirroring the classic report:
- * a mix of healthy and pressured accounts reads as a warning, not as the
- * worst account's status.
- */
-function aggregateStatus(limits: readonly { status?: UsageLimit["status"] }[]): UsageLimit["status"] {
-	const hasOk = limits.some(limit => limit.status === "ok");
-	const hasWarning = limits.some(limit => limit.status === "warning");
-	const hasExhausted = limits.some(limit => limit.status === "exhausted");
-	if (hasOk) return hasWarning || hasExhausted ? "warning" : "ok";
-	if (hasWarning) return "warning";
-	if (hasExhausted) return "exhausted";
-	return "unknown";
+	/** True when this credential has verified Daybreak access. */
+	daybreak: boolean;
 }
 
 /** Fraction below which a window counts as untouched (renders as 100% free). */
@@ -121,122 +99,74 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
 }
 
 /**
- * Collapse usage reports into one compact card per provider: limits grouped by
- * quota bucket (label + window), each bucket showing the mean used fraction
- * across accounts (matching the classic report's aggregate "% free") with the
- * most-used account's reset countdown. Cards sort most-pressing first so
- * what's burning is on top-left; fully idle providers collapse into a tick.
+ * Collapse one credential's usage report into a compact card: limits grouped
+ * by quota bucket (label + window), each bucket showing this credential's own
+ * used fraction, status and reset countdown. Windows sort most-pressing
+ * first; a fully idle credential collapses into a tick.
  */
-export function buildProviderCards(reports: UsageReport[], nowMs: number): ProviderCard[] {
-	const displayReports = collapseSharedUsageReports(reports);
-	const grouped = new Map<string, UsageReport[]>();
-	for (const report of displayReports) {
-		const list = grouped.get(report.provider) ?? [];
-		list.push(report);
-		grouped.set(report.provider, list);
+export function buildCredentialCard(report: UsageReport, nowMs: number): CredentialCard {
+	const [collapsed = report] = collapseSharedUsageReports([report]);
+	const buckets = new Map<string, { label: string; limits: UsageLimit[] }>();
+	for (const limit of collapsed.limits) {
+		const label = formatLimitTitle(limit);
+		const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
+		const entry = buckets.get(key) ?? { label, limits: [] };
+		entry.limits.push(limit);
+		buckets.set(key, entry);
 	}
 
-	const cards: ProviderCard[] = [];
-	for (const [provider, providerReports] of grouped) {
-		const buckets = new Map<string, { label: string; limits: UsageLimit[] }>();
-		for (const report of providerReports) {
-			for (const limit of report.limits) {
-				const label = formatLimitTitle(limit);
-				const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
-				const entry = buckets.get(key) ?? { label, limits: [] };
-				entry.limits.push(limit);
-				buckets.set(key, entry);
-			}
-		}
-
-		const windows: CardWindowRow[] = [...buckets.values()].map(bucket => {
-			const fractions = bucket.limits
-				.map(limit => resolveUsedFraction(limit))
-				.filter((value): value is number => value !== undefined);
-			const fraction =
-				fractions.length > 0 ? fractions.reduce((sum, value) => sum + value, 0) / fractions.length : undefined;
-			const worst = bucket.limits.reduce((max, limit) =>
-				(resolveUsedFraction(limit) ?? -1) > (resolveUsedFraction(max) ?? -1) ? limit : max,
-			);
-			const resetsAt = worst.window?.resetsAt;
-			return {
-				label: bucket.label,
-				windowTag: worst.window ? compactWindowTag(worst.window) : undefined,
-				fraction,
-				status: aggregateStatus(bucket.limits),
-				resetMs: resetsAt !== undefined && resetsAt > nowMs ? resetsAt - nowMs : undefined,
-				usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
-			};
-		});
-		windows.sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1));
-		// The window tag earns its columns only when sibling rows would otherwise
-		// be indistinguishable (e.g. Antigravity's daily vs weekly "Usage (Google)").
-		for (const window of windows) {
-			const duplicated = windows.some(other => other !== window && other.label === window.label);
-			if (!duplicated) window.windowTag = undefined;
-		}
-
-		const resetRows = providerReports
-			.map(report => summarizeUsageResetCredits(report.resetCredits, nowMs))
-			.filter((summary): summary is UsageResetSummary => summary !== undefined && summary.bankedCount > 0);
-		const bankedCount = resetRows.reduce((total, summary) => total + summary.bankedCount, 0);
-		const redeemableCount = resetRows.reduce((total, summary) => total + summary.redeemableCount, 0);
-		const resetExpiries = resetRows
-			.map(summary => summary.soonestExpiry)
-			.filter((expiry): expiry is string => expiry !== undefined)
-			.map(expiry => Date.parse(expiry))
-			.filter(Number.isFinite)
-			.sort((left, right) => left - right);
-		const soonestResetExpiry = resetExpiries.find(expiry => expiry > nowMs) ?? resetExpiries.at(-1);
-		const unavailableReasons = [
-			...new Set(
-				resetRows
-					.map(summary => summary.unavailableReason)
-					.filter((reason): reason is string => reason !== undefined),
-			),
-		];
-		const resetCredits =
-			bankedCount > 0
-				? {
-						bankedCount,
-						redeemableCount,
-						soonestExpiryMs: soonestResetExpiry === undefined ? undefined : soonestResetExpiry - nowMs,
-						unavailableReasons,
-					}
-				: undefined;
-		const daybreakAccounts = providerReports.flatMap((report, index) =>
-			report.metadata?.daybreak === true
-				? [
-						typeof report.metadata.email === "string" && report.metadata.email
-							? report.metadata.email
-							: typeof report.metadata.accountId === "string" && report.metadata.accountId
-								? report.metadata.accountId
-								: `account ${index + 1}`,
-					]
-				: [],
+	const windows: CardWindowRow[] = [...buckets.values()].map(bucket => {
+		const worst = bucket.limits.reduce((max, limit) =>
+			(resolveUsedFraction(limit) ?? -1) > (resolveUsedFraction(max) ?? -1) ? limit : max,
 		);
-		cards.push({
-			provider,
-			name: formatProviderName(provider),
-			accounts: providerReports.length,
-			windows,
-			unlimited: windows.length === 0,
-			idle:
-				!resetCredits &&
-				daybreakAccounts.length === 0 &&
-				windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
-			resetCredits,
-			...(daybreakAccounts.length > 0 ? { daybreakAccounts } : {}),
-		});
+		const fraction = resolveUsedFraction(worst);
+		const resetsAt = worst.window?.resetsAt;
+		return {
+			label: bucket.label,
+			windowTag: worst.window ? compactWindowTag(worst.window) : undefined,
+			fraction,
+			status: worst.status,
+			resetMs: resetsAt !== undefined && resetsAt > nowMs ? resetsAt - nowMs : undefined,
+			usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
+		};
+	});
+	windows.sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1));
+	// The window tag earns its columns only when sibling rows would otherwise
+	// be indistinguishable (e.g. Antigravity's daily vs weekly "Usage (Google)").
+	for (const window of windows) {
+		const duplicated = windows.some(other => other !== window && other.label === window.label);
+		if (!duplicated) window.windowTag = undefined;
 	}
 
-	cards.sort((a, b) => {
-		const aWorst = a.windows[0]?.fraction ?? -1;
-		const bWorst = b.windows[0]?.fraction ?? -1;
-		if (aWorst !== bWorst) return bWorst - aWorst;
-		return a.name.localeCompare(b.name);
-	});
-	return cards;
+	const resetSummary = summarizeUsageResetCredits(collapsed.resetCredits, nowMs);
+	const resetCredits =
+		resetSummary && resetSummary.bankedCount > 0
+			? {
+					bankedCount: resetSummary.bankedCount,
+					redeemableCount: resetSummary.redeemableCount,
+					soonestExpiryMs: (() => {
+						if (resetSummary.soonestExpiry === undefined) return undefined;
+						const expiryMs = Date.parse(resetSummary.soonestExpiry);
+						return Number.isFinite(expiryMs) ? expiryMs - nowMs : undefined;
+					})(),
+					unavailableReasons: resetSummary.unavailableReason ? [resetSummary.unavailableReason] : [],
+				}
+			: undefined;
+
+	const daybreak = collapsed.metadata?.daybreak === true;
+
+	return {
+		provider: collapsed.provider,
+		name: formatProviderName(collapsed.provider),
+		windows,
+		unlimited: windows.length === 0,
+		idle:
+			!resetCredits &&
+			!daybreak &&
+			windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
+		resetCredits,
+		daybreak,
+	};
 }
 
 // =============================================================================
@@ -325,7 +255,9 @@ export function buildHeatmapLayout(points: DailyActivityPoint[], weeks: number, 
 
 /** Callbacks and data sources for {@link UsageDashboardComponent}. */
 export interface UsageDashboardOptions {
-	reports: UsageReport[];
+	report: UsageReport;
+	/** `${credentialName(row)} (#${row.id})`, shown in the panel title. */
+	credentialLabel: string;
 	/**
 	 * Full classic `/usage` report for the expanded detail view; re-invoked per
 	 * terminal width.
@@ -373,7 +305,7 @@ interface CardRowLayout {
 
 export class UsageDashboardComponent implements Component {
 	#options: UsageDashboardOptions;
-	#cards: ProviderCard[];
+	#cards: CredentialCard[];
 	#nowMs: number;
 	#view: "overview" | "detail" = "overview";
 	#scroll = 0;
@@ -393,8 +325,8 @@ export class UsageDashboardComponent implements Component {
 		ensureThemeSync();
 		this.#options = options;
 		this.#nowMs = Date.now();
-		this.#cards = buildProviderCards(options.reports, this.#nowMs);
-		this.#panel = new OverlayPanel("Usage");
+		this.#cards = [buildCredentialCard(options.report, this.#nowMs)];
+		this.#panel = new OverlayPanel(`Usage — ${options.credentialLabel}`);
 		this.#header = new PanelRows();
 		this.#header.setHeight(1);
 		this.#body = new PanelRows();
@@ -460,18 +392,15 @@ export class UsageDashboardComponent implements Component {
 		return `${theme.fg(this.#statusColor(status), bar)}${theme.fg("dim", empty)}`;
 	}
 
-	#renderCardLines(card: ProviderCard, width: number, labels: string[][], layout: CardRowLayout): string[] {
+	#renderCardLines(card: CredentialCard, width: number, labels: string[][], layout: CardRowLayout): string[] {
 		const lines: string[] = [];
-		const cardStatus = card.unlimited ? "ok" : aggregateStatus(card.windows);
-		const accountsText = card.accounts > 1 ? theme.fg("dim", `${card.accounts} accts`) : "";
-		const titleBudget = width - 2 - visibleWidth(accountsText) - (accountsText ? 1 : 0);
-		const title = theme.bold(truncateToWidth(card.name, Math.max(4, titleBudget)));
-		const titlePad = Math.max(0, width - 2 - visibleWidth(title) - visibleWidth(accountsText));
-		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}${accountsText}`);
+		const cardStatus = card.unlimited ? "ok" : (card.windows[0]?.status ?? "unknown");
+		const title = theme.bold(truncateToWidth(card.name, Math.max(4, width - 2)));
+		const titlePad = Math.max(0, width - 2 - visibleWidth(title));
+		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}`);
 
-		for (const account of card.daybreakAccounts ?? []) {
-			const label = sanitizeText(account.replace(/[\r\n\t]+/g, " "));
-			lines.push(`  ${theme.fg("success", truncateToWidth(`daybreak · ${label}`, width - 2))}`);
+		if (card.daybreak) {
+			lines.push(`  ${theme.fg("success", "daybreak")}`);
 		}
 
 		if (card.resetCredits) {
@@ -721,9 +650,12 @@ export class UsageDashboardComponent implements Component {
 		const maxScroll = Math.max(0, contentSource.length - contentRows);
 		if (this.#scroll > maxScroll) this.#scroll = maxScroll;
 
-		const latestFetchedAt = Math.max(0, ...this.#options.reports.map(report => report.fetchedAt ?? 0));
+		const latestFetchedAt = this.#options.report.fetchedAt ?? 0;
 		const checkedText = latestFetchedAt ? `checked ${formatDuration(this.#nowMs - latestFetchedAt)} ago` : "";
-		const title = this.#view === "detail" ? "Usage · Details" : "Usage";
+		const title =
+			this.#view === "detail"
+				? `Usage · Details — ${this.#options.credentialLabel}`
+				: `Usage — ${this.#options.credentialLabel}`;
 
 		const scrollHint = maxScroll > 0 ? "↑/↓ scroll · " : "";
 		const hint = this.#view === "detail" ? `${scrollHint}Esc back` : `${scrollHint}↵ details · Esc close`;

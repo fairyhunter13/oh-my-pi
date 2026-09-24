@@ -1907,7 +1907,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
-	getClientUsageSummary(sinceMs: number): ClientUsageSummary {
+	getClientUsageSummary(
+		sinceMs: number,
+		credential: { provider: string; credentialId: number | null },
+	): ClientUsageSummary {
 		const clients = this.#db
 			.query("SELECT install_id, hostname, first_seen, last_seen FROM clients ORDER BY last_seen DESC")
 			.all() as Array<{ install_id: string; hostname: string | null; first_seen: number; last_seen: number }>;
@@ -1916,10 +1919,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				`SELECT install_id, app, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
 					SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
 					SUM(cache_write_tokens) cache_write_tokens, SUM(cost_usd) cost_usd
-				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, app, provider
+				 FROM client_usage WHERE recorded_at >= ? AND provider = ? AND credential_id IS ? GROUP BY install_id, app, provider
 				 ORDER BY install_id, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`,
 			)
-			.all(sinceMs) as Array<{
+			.all(sinceMs, credential.provider, credential.credentialId) as Array<{
 			install_id: string;
 			app: string;
 			provider: string;

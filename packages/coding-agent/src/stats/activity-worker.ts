@@ -16,9 +16,9 @@ async function handleLoad(
 	try {
 		// Whatever the DB already has paints first; the incremental sync then
 		// converges the heatmap on fresh session data.
-		transport.send({ type: "activity", id: message.id, points: await getDailyActivity() });
+		transport.send({ type: "activity", id: message.id, points: await getDailyActivity(message.credential) });
 		await syncAllSessions();
-		transport.send({ type: "activity", id: message.id, points: await getDailyActivity() });
+		transport.send({ type: "activity", id: message.id, points: await getDailyActivity(message.credential) });
 		transport.send({ type: "done", id: message.id });
 	} catch (error) {
 		transport.send({

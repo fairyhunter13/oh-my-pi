@@ -11,6 +11,8 @@ export interface AppLayoutProps {
 	onSectionChange: (section: DashboardSection) => void;
 	range: TimeRange;
 	onRangeChange: (range: TimeRange) => void;
+	credential: string | null;
+	onCredentialChange: (credential: string | null) => void;
 	updatedAt: number | null;
 	onSyncStart?: () => void;
 	onSyncComplete?: (result: { success: boolean }) => void;
@@ -22,6 +24,8 @@ export function AppLayout({
 	onSectionChange,
 	range,
 	onRangeChange,
+	credential,
+	onCredentialChange,
 	updatedAt,
 	onSyncStart,
 	onSyncComplete,
@@ -78,6 +82,8 @@ export function AppLayout({
 					activeSection={activeSection}
 					range={range}
 					onRangeChange={onRangeChange}
+					credential={credential}
+					onCredentialChange={onCredentialChange}
 					updatedAt={updatedAt}
 					onSyncStart={onSyncStart}
 					onSyncComplete={onSyncComplete}

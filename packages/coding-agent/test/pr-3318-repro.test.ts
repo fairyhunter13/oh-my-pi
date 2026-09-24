@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { CredentialSummary, UsageReport } from "@oh-my-pi/pi-ai";
 import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
 
 describe("PR 3318 repro", () => {
@@ -17,13 +17,43 @@ describe("PR 3318 repro", () => {
 			],
 			metadata: { email: "", accountId: "", projectId: "" },
 		};
-		const text = await buildUsageReportText({
-			session: {
-				model: undefined,
-				fetchUsageReports: async () => [report],
-				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
-			},
-		} as never);
+		const row: CredentialSummary = {
+			id: 1,
+			provider: "test-provider",
+			kind: "api_key",
+			label: null,
+			identity: null,
+			org: null,
+			hint: null,
+			disabled: null,
+			isDefault: false,
+			active: false,
+			pinned: false,
+		};
+		const text = await buildUsageReportText(
+			{
+				session: {
+					model: undefined,
+					sessionId: undefined,
+					fetchUsageReports: async () => [report],
+					getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
+					modelRegistry: {
+						getProviderBaseUrl: () => undefined,
+						authStorage: {
+							listCredentials: () => [row],
+							credentials: {
+								list: () => [{ id: row.id, provider: row.provider, credential: { type: "api_key", key: "x" } }],
+							},
+							usage: {
+								providerFor: () => ({}),
+								report: async () => report,
+							},
+						},
+					},
+				},
+			} as never,
+			"test-provider/1",
+		);
 
 		expect(text).toContain("scoped-account: 1.00 requests used");
 		expect(text).not.toContain("account 1: 1.00 requests used");

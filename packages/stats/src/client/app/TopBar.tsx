@@ -1,5 +1,6 @@
 import { Menu } from "lucide-react";
 import type { TimeRange } from "../types";
+import { CredentialControl } from "./CredentialControl";
 import { RangeControl } from "./RangeControl";
 import type { DashboardSection } from "./routes";
 import { routes } from "./routes";
@@ -10,6 +11,8 @@ export interface TopBarProps {
 	activeSection: DashboardSection;
 	range: TimeRange;
 	onRangeChange: (range: TimeRange) => void;
+	credential: string | null;
+	onCredentialChange: (credential: string | null) => void;
 	updatedAt: number | null;
 	onSyncStart?: () => void;
 	onSyncComplete?: (result: { success: boolean }) => void;
@@ -21,6 +24,8 @@ export function TopBar({
 	activeSection,
 	range,
 	onRangeChange,
+	credential,
+	onCredentialChange,
 	updatedAt,
 	onSyncStart,
 	onSyncComplete,
@@ -61,6 +66,8 @@ export function TopBar({
 						{formatLastUpdated(updatedAt)}
 					</span>
 				</div>
+
+				<CredentialControl value={credential} onChange={onCredentialChange} />
 
 				<RangeControl value={range} onChange={onRangeChange} />
 

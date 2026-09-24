@@ -117,19 +117,24 @@ const PREVIEW_WIDTH = 60;
 
 /**
  * One-line provider quota display. The host supplies normalized usage reports
- * and an optional credential filter; the overlay owns only presentation.
+ * and a credential filter; the overlay owns only presentation. Several
+ * reports of the provider that pass the filter would merge into one
+ * aggregate quota, so that case renders nothing instead.
  */
 export function formatCompactQuota(
 	provider: string,
 	reports: UsageReport[],
 	nowMs: number,
-	includeLimit?: (report: UsageReport, limit: UsageLimit) => boolean,
+	includeLimit: (report: UsageReport, limit: UsageLimit) => boolean,
 ): string | null {
+	const matchingReports = reports.filter(
+		report => report.provider === provider && report.limits.some(limit => includeLimit(report, limit)),
+	);
+	if (matchingReports.length > 1) return null;
 	const byWindow = new Map<string, { limit: UsageLimit; fraction: number }>();
-	for (const report of reports) {
-		if (report.provider !== provider) continue;
+	for (const report of matchingReports) {
 		for (const limit of report.limits) {
-			if (includeLimit && !includeLimit(report, limit)) continue;
+			if (!includeLimit(report, limit)) continue;
 			const fraction = resolveUsedFraction(limit);
 			if (fraction === undefined) continue;
 			const key = limit.window?.id ?? limit.scope.windowId ?? "—";
@@ -442,7 +447,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 				quotaProvider,
 				this.#cachedReports,
 				Date.now(),
-				this.#cb.getQuotaLimitFilter?.(quotaProvider, liveStat?.sessionId),
+				this.#cb.getQuotaLimitFilter?.(quotaProvider, liveStat?.sessionId) ?? (() => true),
 			);
 			if (quota) lines.push(theme.fg("dim", `  ${quota}`));
 		}

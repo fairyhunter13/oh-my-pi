@@ -22,25 +22,32 @@ import { formatEstimatedCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildModelPerformanceLookup } from "../data/view-models";
 import type { ModelPerformancePoint, ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
-import { AsyncBoundary, Panel } from "../ui";
+import { AsyncBoundary, EmptyState, Panel } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
 
 export interface ModelsRouteProps {
 	active: boolean;
 	range: TimeRange;
+	credential: string | null;
 	refreshTrigger: number;
 }
 
-export function ModelsRoute({ active, range, refreshTrigger }: ModelsRouteProps) {
+export function ModelsRoute({ active, range, credential, refreshTrigger }: ModelsRouteProps) {
 	const {
 		data: modelStats,
 		error,
 		loading,
-	} = useResource(["models", range, refreshTrigger], signal => getModelDashboardStats(range, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+	} = useResource(
+		["models", range, credential, refreshTrigger],
+		signal => getModelDashboardStats(range, credential as string, signal),
+		{
+			pollMs: 30000,
+			enabled: active && credential !== null,
+		},
+	);
 	const modelColorLookup = useMemo(() => buildModelColorLookup(modelStats?.byModel ?? []), [modelStats?.byModel]);
+
+	if (!credential) return <EmptyState message="Pick a credential to see its numbers." />;
 
 	return (
 		<div className="stats-route-container space-y-6">

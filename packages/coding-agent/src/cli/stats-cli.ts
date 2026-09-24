@@ -8,6 +8,7 @@ import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+import type { StatsCredential } from "@oh-my-pi/omp-stats";
 import { openPath } from "../utils/open";
 
 /**
@@ -61,6 +62,35 @@ export interface StatsCommandArgs {
 	host: string;
 	json: boolean;
 	summary: boolean;
+	/** `<provider>:<id|none>`; with no flag and one candidate, that candidate is used. */
+	credential?: string;
+}
+
+/**
+ * Resolve the one credential `--json`/`--summary` acts on: the `--credential`
+ * flag when given, else the sole candidate `messages` holds. With more than
+ * one candidate and no flag, print the choices to stderr and set exit 2
+ * rather than silently merging them into one view.
+ */
+async function resolveStatsCredential(credentialArg: string | undefined): Promise<StatsCredential | undefined> {
+	// Lazy import to avoid loading stats module when not needed (matches runStatsCommand below).
+	const { formatStatsCredential, parseStatsCredential } = await import("@oh-my-pi/omp-stats");
+	const parsed = parseStatsCredential(credentialArg);
+	if (parsed) return parsed;
+	if (credentialArg !== undefined) {
+		process.stderr.write(chalk.yellow(`"${credentialArg}" is not "<provider>:<id>" or "<provider>:none".\n`));
+		process.exitCode = 2;
+		return undefined;
+	}
+	const { listStatsCredentials } = await import("@oh-my-pi/omp-stats/db");
+	const candidates = listStatsCredentials();
+	if (candidates.length === 1) return candidates[0];
+	process.stderr.write(chalk.yellow("Pick a credential with --credential <provider>:<id|none>:\n"));
+	for (const candidate of candidates) {
+		process.stderr.write(chalk.yellow(`  ${formatStatsCredential(candidate)}  (${candidate.requests} requests)\n`));
+	}
+	process.exitCode = 2;
+	return undefined;
 }
 
 function normalizePremiumRequests(n: number): number {
@@ -84,14 +114,15 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	const total = await getTotalMessageCount();
 	console.log(`Synced ${processed} new entries from ${files} files (${total} total)\n`);
 
-	if (cmd.json) {
-		const stats = await getDashboardStats();
-		console.log(JSON.stringify(stats, null, 2));
-		return;
-	}
-
-	if (cmd.summary) {
-		await printStatsSummary();
+	if (cmd.json || cmd.summary) {
+		const credential = await resolveStatsCredential(cmd.credential);
+		if (!credential) return;
+		if (cmd.json) {
+			const stats = await getDashboardStats(credential);
+			console.log(JSON.stringify(stats, null, 2));
+			return;
+		}
+		await printStatsSummary(credential);
 		return;
 	}
 
@@ -116,9 +147,9 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	await new Promise(() => {});
 }
 
-async function printStatsSummary(): Promise<void> {
+async function printStatsSummary(credential: StatsCredential): Promise<void> {
 	const { getDashboardStats } = await import("@oh-my-pi/omp-stats");
-	const stats = await getDashboardStats();
+	const stats = await getDashboardStats(credential);
 	const { overall, byModel, byFolder } = stats;
 
 	console.log(chalk.bold("\n=== AI Usage Statistics ===\n"));

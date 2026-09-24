@@ -3629,6 +3629,7 @@ export class AgentSession implements SettingsScope {
 						cacheWrite: assistantMsg.usage.cacheWrite,
 					},
 					costUsd: assistantMsg.usage.cost.total,
+					credentialId: assistantMsg.credentialId,
 				});
 				// ccw: a turn that a stored row served becomes the session's one choice, so a later
 				// 429 or 401 never moves the session to another account. A failed turn adopts nothing.
@@ -11219,7 +11220,6 @@ export class AgentSession implements SettingsScope {
 		}
 		return [...selectors].sort((left, right) => left.localeCompare(right));
 	}
-
 
 	/**
 	 * Redeem one provider-selected saved rate-limit reset for an exact stored

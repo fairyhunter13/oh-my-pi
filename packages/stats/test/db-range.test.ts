@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { getDashboardStats, getFolderStats } from "@oh-my-pi/omp-stats/aggregator";
 import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
-import type { FolderStats, MessageStats } from "@oh-my-pi/omp-stats/types";
+import type { FolderStats, MessageStats, StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { handleApi } from "../src/server";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-db-range-");
+
+const CREDENTIAL: StatsCredential = { provider: "openai-codex", credentialId: null };
 
 function makeMessage(timestamp: number, entryId: string, folder = "/tmp/project"): MessageStats {
 	return {
@@ -50,7 +52,7 @@ describe("getDashboardStats time range", () => {
 		const now = Date.now();
 		insertMessageStats([makeMessage(now, "within-24h"), makeMessage(now - 48 * 60 * 60 * 1000, "outside-24h")]);
 
-		const dayStats = await getDashboardStats("24h");
+		const dayStats = await getDashboardStats(CREDENTIAL, "24h");
 		expect(dayStats.overall.totalRequests).toBe(1);
 		expect(dayStats.byModel[0]).toMatchObject({
 			totalRequests: 1,
@@ -58,11 +60,11 @@ describe("getDashboardStats time range", () => {
 			provider: "openai-codex",
 		});
 
-		const weekStats = await getDashboardStats("7d");
+		const weekStats = await getDashboardStats(CREDENTIAL, "7d");
 		expect(weekStats.overall.totalRequests).toBe(2);
 		expect(weekStats.byModel[0]).toMatchObject({ totalRequests: 2, model: "gpt-5.4", provider: "openai-codex" });
 
-		const allStats = await getDashboardStats("all");
+		const allStats = await getDashboardStats(CREDENTIAL, "all");
 		expect(allStats.overall.totalRequests).toBe(2);
 	});
 
@@ -72,7 +74,7 @@ describe("getDashboardStats time range", () => {
 		const now = Date.now();
 		insertMessageStats([makeMessage(now, "within-24h"), makeMessage(now - 48 * 60 * 60 * 1000, "outside-24h")]);
 
-		const stats = await getDashboardStats("last century");
+		const stats = await getDashboardStats(CREDENTIAL, "last century");
 		expect(stats.overall.totalRequests).toBe(1);
 	});
 
@@ -85,10 +87,10 @@ describe("getDashboardStats time range", () => {
 			makeMessage(now - 48 * 60 * 60 * 1000, "folder-outside-24h", "/tmp/older-project"),
 		]);
 
-		const dayStats = await getFolderStats("24h");
+		const dayStats = await getFolderStats(CREDENTIAL, "24h");
 		expect(dayStats).toEqual([expect.objectContaining({ folder: "/tmp/current-project", totalRequests: 1 })]);
 
-		const allStats = await getFolderStats("all");
+		const allStats = await getFolderStats(CREDENTIAL, "all");
 		expect(allStats).toHaveLength(2);
 		expect(allStats).toEqual(
 			expect.arrayContaining([
@@ -112,7 +114,7 @@ describe("getDashboardStats time range", () => {
 		db.run("ALTER TABLE messages DROP COLUMN agent_type");
 
 		const folders = await readFolderStats(
-			await handleApi(new Request("http://stats.test/api/stats/folders?range=24h")),
+			await handleApi(new Request("http://stats.test/api/stats/folders?range=24h&credential=openai-codex:none")),
 		);
 		expect(folders).toEqual([expect.objectContaining({ folder: "/tmp/current-project", totalRequests: 1 })]);
 	});

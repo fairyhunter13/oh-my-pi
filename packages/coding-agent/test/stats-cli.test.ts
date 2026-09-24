@@ -23,6 +23,7 @@ describe("stats dashboard host arguments", () => {
 			host: "::",
 			json: false,
 			summary: false,
+			credential: undefined,
 		});
 	});
 

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+	type CredentialSummary,
 	getEnvApiKey,
 	getProviderDetails,
 	type ProviderDetails,
@@ -11,6 +12,7 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -630,28 +632,39 @@ export class CommandController {
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
 	}
 
-	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
-		let usageReports = reports ?? null;
-		if (!usageReports) {
-			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
-			if (!provider.fetchUsageReports) {
-				this.ctx.showWarning("Usage reporting is not configured for this session.");
-				return;
-			}
-			try {
-				usageReports = await provider.fetchUsageReports();
-			} catch (error) {
-				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
-				return;
-			}
-		}
-
-		if (!usageReports || usageReports.length === 0) {
-			this.ctx.showWarning("No usage data available.");
+	async handleUsageCommand(): Promise<void> {
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const sessionId = this.ctx.session.sessionId;
+		const rows: CredentialSummary[] = authStorage
+			.listCredentials(undefined, sessionId)
+			.filter(row => row.disabled === null && authStorage.usage.providerFor(row.provider) !== undefined);
+		if (rows.length === 0) {
+			this.ctx.showWarning("No stored credential has a usage endpoint. Use /login to add one.");
 			return;
 		}
-
-		this.ctx.showUsageDashboard(usageReports);
+		const target = await this.ctx.pickCredential({ verb: "Usage", rows });
+		if (!target || target.kind !== "row") return;
+		const { provider, row } = target;
+		const stored = authStorage.credentials.list(provider).find(entry => entry.id === row.id);
+		if (!stored) {
+			this.ctx.showWarning(`No usage data for ${credentialName(row)} (#${row.id}).`);
+			return;
+		}
+		let report: UsageReport | null;
+		try {
+			report = await authStorage.usage.report(provider, stored.credential, {
+				baseUrl: this.ctx.session.modelRegistry.getProviderBaseUrl(provider),
+				signal: AbortSignal.timeout(15_000),
+			});
+		} catch (error) {
+			this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		if (!report) {
+			this.ctx.showWarning(`No usage data for ${credentialName(row)} (#${row.id}).`);
+			return;
+		}
+		this.ctx.showUsageDashboard({ provider, row, report });
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {

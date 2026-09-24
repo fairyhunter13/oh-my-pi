@@ -560,7 +560,9 @@ describe("auth-broker wire surface", () => {
 			entries: [{ ...entry, provider: "openai-codex", model: "gpt-y", requests: 1, costUsd: 0 }],
 		});
 
-		const summary = await client.fetchClientUsageSummary();
+		const anthropicNull = { provider: "anthropic", credentialId: null } as const;
+		const codexNull = { provider: "openai-codex", credentialId: null } as const;
+		const summary = await client.fetchClientUsageSummary(anthropicNull);
 		expect(summary.clients).toHaveLength(2);
 		const first = summary.clients.find(c => c.installId === "install-1");
 		expect(first).toMatchObject({ hostname: "mbp.local" });
@@ -576,7 +578,8 @@ describe("auth-broker wire surface", () => {
 				costUsd: 3.25,
 			},
 		]);
-		const second = summary.clients.find(c => c.installId === "install-2");
+		const codexSummary = await client.fetchClientUsageSummary(codexNull);
+		const second = codexSummary.clients.find(c => c.installId === "install-2");
 		expect(second?.hostname).toBeUndefined();
 		expect(second?.providers[0]).toMatchObject({ provider: "openai-codex", requests: 1 });
 
@@ -587,7 +590,7 @@ describe("auth-broker wire surface", () => {
 			app: "robomp",
 			entries: [{ ...entry, provider: "openai-codex", model: "gpt-y", requests: 4, costUsd: 1.5 }],
 		});
-		const withApps = await client.fetchClientUsageSummary();
+		const withApps = await client.fetchClientUsageSummary(codexNull);
 		const labeled = withApps.clients.find(c => c.installId === "install-2");
 		expect(labeled?.providers).toHaveLength(2);
 		expect(labeled?.providers.find(p => p.app === "robomp")).toMatchObject({
@@ -601,7 +604,7 @@ describe("auth-broker wire surface", () => {
 		});
 
 		// sinceMs beyond the recorded timestamps returns clients with no aggregates.
-		const future = await client.fetchClientUsageSummary({ sinceMs: now + 60_000 });
+		const future = await client.fetchClientUsageSummary({ sinceMs: now + 60_000, ...codexNull });
 		expect(future.clients.every(c => c.providers.length === 0)).toBe(true);
 
 		// Malformed body is rejected by schema validation.
@@ -971,7 +974,7 @@ describe("client_usage app column migration", () => {
 					},
 				],
 			});
-			const summary = migrated.getClientUsageSummary(0);
+			const summary = migrated.getClientUsageSummary(0, { provider: "anthropic", credentialId: null });
 			const client = summary.clients.find(c => c.installId === "legacy-install");
 			expect(client?.providers.find(p => p.app === undefined)).toMatchObject({
 				provider: "anthropic",
@@ -985,6 +988,65 @@ describe("client_usage app column migration", () => {
 			});
 		} finally {
 			migrated.close();
+			await removeWithRetries(dir);
+		}
+	});
+});
+
+describe("getClientUsageSummary filters by credential", () => {
+	test("returns only the asked credential's rows, null included", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-client-summary-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		try {
+			const at = Date.now();
+			const entry = {
+				at,
+				provider: "anthropic",
+				model: "claude-x",
+				requests: 1,
+				inputTokens: 10,
+				outputTokens: 5,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				costUsd: 0.1,
+			};
+			store.recordClientUsage({ installId: "install-a", entries: [{ ...entry, credentialId: 1 }] });
+			store.recordClientUsage({ installId: "install-a", entries: [{ ...entry, credentialId: 2, requests: 2 }] });
+			store.recordClientUsage({ installId: "install-a", entries: [{ ...entry, requests: 3 }] });
+			store.recordClientUsage({
+				installId: "install-a",
+				entries: [{ ...entry, provider: "openai-codex", credentialId: 1, requests: 4 }],
+			});
+
+			const credentialOne = store.getClientUsageSummary(0, { provider: "anthropic", credentialId: 1 });
+			const rowsOne = credentialOne.clients.find(c => c.installId === "install-a")?.providers ?? [];
+			expect(rowsOne).toEqual([
+				{
+					provider: "anthropic",
+					requests: 1,
+					inputTokens: 10,
+					outputTokens: 5,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+					costUsd: 0.1,
+				},
+			]);
+
+			const credentialTwo = store.getClientUsageSummary(0, { provider: "anthropic", credentialId: 2 });
+			expect(credentialTwo.clients.find(c => c.installId === "install-a")?.providers.map(p => p.requests)).toEqual([
+				2,
+			]);
+
+			const unattributed = store.getClientUsageSummary(0, { provider: "anthropic", credentialId: null });
+			expect(unattributed.clients.find(c => c.installId === "install-a")?.providers.map(p => p.requests)).toEqual([
+				3,
+			]);
+
+			// A different provider under the same credential id never leaks in.
+			const wrongProvider = store.getClientUsageSummary(0, { provider: "anthropic", credentialId: 1 });
+			expect(wrongProvider.clients.find(c => c.installId === "install-a")?.providers).toHaveLength(1);
+		} finally {
+			store.close();
 			await removeWithRetries(dir);
 		}
 	});

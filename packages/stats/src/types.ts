@@ -36,6 +36,13 @@ export interface MessageStats {
 	/** Which agent produced this message (main agent, task subagent, advisor) */
 	agentType: AgentType;
 	/**
+	 * Stored `auth_credentials` row that produced this message, or `null` when
+	 * no stored row did. Optional only because session fixtures that stand in
+	 * for ingest input are typed as `MessageStats` too; `insertMessageStats`
+	 * binds `credentialId ?? null`.
+	 */
+	credentialId?: number | null;
+	/**
 	 * Ingest refused to price this request: a scheduled (time-based) card with no
 	 * recoverable request timestamp, so `usage.cost.total` of 0 is unknown spend
 	 * rather than a free request. Always written by `rowToMessageStats`; optional

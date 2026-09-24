@@ -3,24 +3,29 @@ import { getRecentRequests } from "../api";
 import { formatDurationMs, formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import type { MessageStats, TimeRange } from "../types";
-import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
+import { AsyncBoundary, DataTable, EmptyState, Panel, StatusPill } from "../ui";
 
 export interface RequestsRouteProps {
 	active: boolean;
 	range: TimeRange;
+	credential: string | null;
 	refreshTrigger: number;
 	onRequestClick: (id: number) => void;
 }
 
-export function RequestsRoute({ active, refreshTrigger, onRequestClick }: RequestsRouteProps) {
+export function RequestsRoute({ active, credential, refreshTrigger, onRequestClick }: RequestsRouteProps) {
 	const {
 		data: recentRequests,
 		error,
 		loading,
-	} = useResource(["recent-requests-dense", refreshTrigger], signal => getRecentRequests(50, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+	} = useResource(
+		["recent-requests-dense", credential, refreshTrigger],
+		signal => getRecentRequests(50, credential as string, signal),
+		{
+			pollMs: 30000,
+			enabled: active && credential !== null,
+		},
+	);
 
 	const columns = useMemo(
 		() => [
@@ -103,6 +108,8 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 			{item.errorMessage && <div className="stats-mobile-card-error truncate mt-2">{item.errorMessage}</div>}
 		</div>
 	);
+
+	if (!credential) return <EmptyState message="Pick a credential to see its numbers." />;
 
 	return (
 		<div className="stats-route-container">

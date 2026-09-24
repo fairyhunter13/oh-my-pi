@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -14,23 +14,21 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { Text } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const usageReports: UsageReport[] = [
-	{
-		provider: "openai-codex",
-		fetchedAt: 1_700_000_000_000,
-		limits: [
-			{
-				id: "codex-weekly",
-				label: "Weekly",
-				scope: { provider: "openai-codex", tier: "pro", accountId: "acct-1" },
-				window: { id: "weekly", label: "weekly" },
-				amount: { remainingFraction: 0.25, unit: "requests" },
-				status: "ok",
-			},
-		],
-		metadata: { email: "user@example.com" },
-	},
-];
+const usageReport: UsageReport = {
+	provider: "openai-codex",
+	fetchedAt: 1_700_000_000_000,
+	limits: [
+		{
+			id: "codex-weekly",
+			label: "Weekly",
+			scope: { provider: "openai-codex", tier: "pro", accountId: "acct-1" },
+			window: { id: "weekly", label: "weekly" },
+			amount: { remainingFraction: 0.25, unit: "requests" },
+			status: "ok",
+		},
+	],
+	metadata: { email: "user@example.com" },
+};
 
 describe("issue #6767 /usage output during streaming", () => {
 	let authStorage: AuthStorage;
@@ -38,6 +36,7 @@ describe("issue #6767 /usage output during streaming", () => {
 	let session: AgentSession;
 	let streaming = true;
 	let tempDir: TempDir;
+	let credentialId: number;
 
 	beforeAll(() => {
 		initTheme();
@@ -56,6 +55,9 @@ describe("issue #6767 /usage output during streaming", () => {
 		tempDir = TempDir.createSync("@pi-issue-6767-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		credentialId = authStorage.addApiKey("openai-codex", "test-key");
+		vi.spyOn(authStorage.usage, "providerFor").mockReturnValue({ id: "openai-codex" } as UsageProvider);
+		vi.spyOn(authStorage.usage, "report").mockResolvedValue(usageReport);
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
@@ -88,13 +90,16 @@ describe("issue #6767 /usage output during streaming", () => {
 		const showDashboard = vi.fn();
 		mode.showUsageDashboard = showDashboard;
 
-		await mode.handleUsageCommand(usageReports);
+		await mode.handleUsageCommand();
 
 		// /usage renders as an overlay (the /settings idiom): nothing may mount
 		// into the transcript, mid-stream or otherwise — mounting above the
 		// growing live block is what duplicated in native scrollback (#6767).
 		expect(showDashboard).toHaveBeenCalledTimes(1);
-		expect(showDashboard).toHaveBeenCalledWith(usageReports);
+		const [shown] = showDashboard.mock.calls[0] as [{ provider: string; row: { id: number }; report: UsageReport }];
+		expect(shown.provider).toBe("openai-codex");
+		expect(shown.row.id).toBe(credentialId);
+		expect(shown.report).toEqual(usageReport);
 		expect(mode.chatContainer.children).toEqual([streamedReply]);
 
 		streaming = false;

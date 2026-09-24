@@ -741,7 +741,21 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (req.method === "GET" && pathname === "/v1/usage/clients") {
 					const sinceMsRaw = url.searchParams.get("sinceMs");
 					const sinceMsParsed = sinceMsRaw === null ? Number.NaN : Number.parseInt(sinceMsRaw, 10);
-					const summary = opts.storage.usage.clientSummary(Number.isFinite(sinceMsParsed) ? sinceMsParsed : 0);
+					const provider = url.searchParams.get("provider");
+					const credentialIdRaw = url.searchParams.get("credentialId");
+					const credentialId =
+						credentialIdRaw === "none"
+							? null
+							: credentialIdRaw === null
+								? Number.NaN
+								: Number.parseInt(credentialIdRaw, 10);
+					if (!provider || Number.isNaN(credentialId)) {
+						return json(400, { error: "provider and credentialId are required" });
+					}
+					const summary = opts.storage.usage.clientSummary(Number.isFinite(sinceMsParsed) ? sinceMsParsed : 0, {
+						provider,
+						credentialId,
+					});
 					return json(200, { generatedAt: Date.now(), clients: summary.clients });
 				}
 				if (req.method === "POST" && pathname === "/v1/usage/stale") {

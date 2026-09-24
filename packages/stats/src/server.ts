@@ -19,6 +19,8 @@ import {
 	getTotalMessageCount,
 	syncAllSessions,
 } from "./aggregator";
+import { readCredentialLabels } from "./credential-labels";
+import { listStatsCredentials } from "./db";
 import { decodeEmbeddedClientArchive } from "./embedded-client";
 import embeddedClientArchiveTxt from "./embedded-client.generated.txt";
 import { getGainDashboardStats } from "./gain-aggregator";
@@ -30,6 +32,7 @@ import {
 	STATS_DASHBOARD_HOSTNAME_HEADER,
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
+import { formatStatsCredential, parseStatsCredential } from "./shared-types";
 import {
 	buildSessionTrace,
 	getTraceEntry,
@@ -208,24 +211,51 @@ export async function handleApi(req: Request): Promise<Response> {
 
 	// Stats reads are DB-only; explicit /api/sync does the expensive session scan.
 	const range = url.searchParams.get("range");
+	// Every single-credential route below reads this; missing or unparsable
+	// answers 400 rather than silently merging every credential's rows.
+	const credential = parseStatsCredential(url.searchParams.get("credential"));
+
+	// Liveness/version probe for `probeStatsDashboard` (port-conflict.ts):
+	// checks only the identity headers, never data, so it must never require
+	// a credential the reuse-vs-replace decision has no use for.
+	if (path === "/api/stats/ping") {
+		return Response.json({ ok: true });
+	}
+
+	if (path === "/api/credentials") {
+		const labels = readCredentialLabels();
+		const credentials = listStatsCredentials().map(row => ({
+			...row,
+			id: formatStatsCredential(row),
+			label:
+				row.credentialId === null
+					? `${row.provider} · unattributed`
+					: (labels.get(`${row.provider}:${row.credentialId}`) ?? `#${row.credentialId}`),
+		}));
+		return Response.json(credentials);
+	}
 
 	if (path === "/api/stats") {
-		const stats = await getDashboardStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getDashboardStats(credential, range);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/overview") {
-		const stats = await getOverviewStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getOverviewStats(credential, range);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/model-dashboard") {
-		const stats = await getModelDashboardStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getModelDashboardStats(credential, range);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/costs") {
-		const stats = await getCostDashboardStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getCostDashboardStats(credential, range);
 		return Response.json(stats);
 	}
 
@@ -240,34 +270,40 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/stats/providers") {
-		const stats = await getProviderDashboardStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getProviderDashboardStats(credential, range);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/recent") {
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
 		const limit = url.searchParams.get("limit");
-		const stats = await getRecentRequests(limit ? parseInt(limit, 10) : undefined);
+		const stats = await getRecentRequests(credential, limit ? parseInt(limit, 10) : undefined);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/errors") {
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
 		const limit = url.searchParams.get("limit");
-		const stats = await getRecentErrors(range, limit ? parseInt(limit, 10) : undefined);
+		const stats = await getRecentErrors(credential, range, limit ? parseInt(limit, 10) : undefined);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/models") {
-		const stats = await getDashboardStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getDashboardStats(credential, range);
 		return Response.json(stats.byModel);
 	}
 
 	if (path === "/api/stats/folders") {
-		const stats = await getFolderStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getFolderStats(credential, range);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/timeseries") {
-		const stats = await getDashboardStats(range);
+		if (!credential) return Response.json({ error: "credential required" }, { status: 400 });
+		const stats = await getDashboardStats(credential, range);
 		return Response.json(stats.timeSeries);
 	}
 

@@ -3,8 +3,8 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { DailyActivityPoint } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import {
+	buildCredentialCard,
 	buildHeatmapLayout,
-	buildProviderCards,
 	formatActivityErrorDetail,
 	UsageDashboardComponent,
 } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
@@ -81,130 +81,74 @@ describe("buildHeatmapLayout", () => {
 	});
 });
 
-describe("buildProviderCards", () => {
+describe("buildCredentialCard", () => {
 	const now = Date.now();
 
-	it("averages a window across accounts instead of showing the worst account", () => {
-		// One exhausted + one barely-used account: the classic report shows the
-		// aggregate (~50% free), so the card must not read 0% free.
-		const reports = [
-			report("anthropic", "a@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 1.0, "exhausted", now + 1000)]),
-			report("anthropic", "b@x.test", [limit("anthropic", "b", "7d", "Claude 7 Day", 0.0, "ok", now + 99_000)]),
-		];
-		const cards = buildProviderCards(reports, now);
-		expect(cards).toHaveLength(1);
-		expect(cards[0].windows).toHaveLength(1);
-		expect(cards[0].windows[0].fraction).toBeCloseTo(0.5);
-		// Mixed healthy/exhausted accounts read as warning, not exhausted.
-		expect(cards[0].windows[0].status).toBe("warning");
-		// Reset countdown comes from the most-used account (when capacity returns).
-		expect(cards[0].windows[0].resetMs).toBe(1000);
+	it("keeps this credential's own fraction, status and reset for each window", () => {
+		const exhausted = report("anthropic", "a@x.test", [
+			limit("anthropic", "a", "7d", "Claude 7 Day", 1.0, "exhausted", now + 1000),
+		]);
+		const card = buildCredentialCard(exhausted, now);
+		expect(card.windows).toHaveLength(1);
+		expect(card.windows[0].fraction).toBe(1.0);
+		expect(card.windows[0].status).toBe("exhausted");
+		expect(card.windows[0].resetMs).toBe(1000);
 	});
 
-	it("aggregates reset inventory without showing a spent grant's earlier expiry", () => {
+	it("collapses to a tick when every window is untouched", () => {
+		const idle = report("anthropic", "a@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 0, "ok")]);
+		expect(buildCredentialCard(idle, now).idle).toBe(true);
+
+		const active = report("anthropic", "a@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 0.4, "ok")]);
+		expect(buildCredentialCard(active, now).idle).toBe(false);
+	});
+
+	it("marks a credential with no limits as unlimited", () => {
+		const unlimited = report("ollama-cloud", "l@x.test", []);
+		const card = buildCredentialCard(unlimited, now);
+		expect(card.unlimited).toBe(true);
+		expect(card.idle).toBe(true);
+	});
+
+	it("reads this credential's own reset inventory", () => {
 		const claude = report("anthropic", "claude@example.test", [
 			limit("anthropic", "claude", "5h", "Claude 5 Hour", 0, "ok"),
 		]);
 		claude.resetCredits = {
 			availableCount: 3,
-			redeemableCount: 0,
-			reason: "weekly cooldown",
+			redeemableCount: 2,
 			credits: [
-				{
-					id: "cedar",
-					title: "Claude reset",
-					program: "cedar_ember",
-					remainingCount: 3,
-					usable: false,
-					requiresLimit: true,
-					clears: ["anthropic:5h", "anthropic:7d"],
-					blocking: ["anthropic:7d"],
-					usedFractions: {},
-					expiresAt: new Date(now + 2 * 86_400_000).toISOString(),
-				},
+				{ id: "cedar", remainingCount: 3, expiresAt: new Date(now + 2 * 86_400_000).toISOString() },
 				{ id: "spent", remainingCount: 0, expiresAt: new Date(now + 3_600_000).toISOString() },
 			],
 		};
-		const sibling = report("anthropic", "sibling@example.test", [
-			limit("anthropic", "sibling", "5h", "Claude 5 Hour", 0, "ok"),
-		]);
-		sibling.resetCredits = {
-			availableCount: 2,
-			redeemableCount: 2,
-			credits: [{ id: "later", remainingCount: 2, expiresAt: new Date(now + 3 * 86_400_000).toISOString() }],
-		};
 
-		const card = buildProviderCards([claude, sibling], now)[0];
+		const card = buildCredentialCard(claude, now);
 
 		expect(card.resetCredits).toEqual({
-			bankedCount: 5,
+			bankedCount: 3,
 			redeemableCount: 2,
 			soonestExpiryMs: 2 * 86_400_000,
-			unavailableReasons: ["weekly cooldown"],
+			unavailableReasons: [],
 		});
 		expect(card.idle).toBe(false);
-	});
-
-	it("sorts pressured providers first and collapses untouched ones into idle", () => {
-		const reports = [
-			report("cursor", "c@x.test", [limit("cursor", "c", "monthly", "Cursor Models", 0.0, "ok")]),
-			report("openai-codex", "o@x.test", [limit("openai-codex", "o", "7d", "7 days", 0.4, "ok")]),
-			report("ollama-cloud", "l@x.test", []),
-		];
-		const cards = buildProviderCards(reports, now);
-		expect(cards[0].provider).toBe("openai-codex");
-		expect(cards[0].idle).toBe(false);
-		const idle = cards.filter(card => card.idle).map(card => card.provider);
-		expect(idle.sort()).toEqual(["cursor", "ollama-cloud"]);
-		const unlimited = cards.find(card => card.provider === "ollama-cloud");
-		expect(unlimited?.unlimited).toBe(true);
 	});
 
 	it("shows a prepaid balance on the card instead of falling back to no data", () => {
 		// Balance-only limits carry no fraction, so the card used to render the
 		// literal "no data" for providers that sell prepaid credits.
-		const reports = [
-			report("charm-hyper", "a@x.test", [
-				{
-					id: "charm-hyper:credits",
-					label: "Credit balance",
-					scope: { provider: "charm-hyper", windowId: "balance", shared: true },
-					amount: { remaining: 100, unit: "credits" },
-				},
-			]),
-		];
-		const cards = buildProviderCards(reports, now);
-		expect(cards[0].windows[0].usedText).toBe("100 credits left");
-		expect(cards[0].windows[0].fraction).toBeUndefined();
-		// Untouched providers collapse into a tick; a live balance must not.
-		expect(cards[0].idle).toBe(false);
-	});
-
-	it("collapses an account-wide balance reported once per key, whatever the order", () => {
-		// AuthStorage probes every stored key, so a two-key Charm Hyper account
-		// yields two shared rows for one pool. The two probes fire moments
-		// apart against a moving balance, so they rarely agree exactly — the
-		// values differ here deliberately, or reversing them would prove
-		// nothing and a first-wins implementation would still pass.
-		const balance = (remaining: number) => ({
-			id: "charm-hyper:credits",
-			label: "Credit balance",
-			scope: { provider: "charm-hyper" as const, windowId: "balance", shared: true },
-			amount: { remaining, unit: "credits" as const },
-		});
-		const forward = buildProviderCards(
-			[report("charm-hyper", "a@x.test", [balance(100)]), report("charm-hyper", "b@x.test", [balance(95)])],
-			now,
-		);
-		const reversed = buildProviderCards(
-			[report("charm-hyper", "b@x.test", [balance(95)]), report("charm-hyper", "a@x.test", [balance(100)])],
-			now,
-		);
-
-		// One pool, so never the 195 a sum would claim, and never dependent on
-		// which credential happened to be probed first.
-		expect(forward[0].windows[0].usedText).toBe("100 credits left");
-		expect(reversed[0].windows[0].usedText).toBe("100 credits left");
+		const balance = report("charm-hyper", "a@x.test", [
+			{
+				id: "charm-hyper:credits",
+				label: "Credit balance",
+				scope: { provider: "charm-hyper", windowId: "balance", shared: true },
+				amount: { remaining: 100, unit: "credits" },
+			},
+		]);
+		const card = buildCredentialCard(balance, now);
+		expect(card.windows[0].usedText).toBe("100 credits left");
+		expect(card.windows[0].fraction).toBeUndefined();
+		expect(card.idle).toBe(false);
 	});
 
 	it("shows each marked shared quota once without merging independent buckets", () => {
@@ -216,18 +160,16 @@ describe("buildProviderCards", () => {
 				scope: { ...value.scope, shared: true, sharedGroup: `3p-${windowId}` },
 			};
 		};
-		const reports = [
-			report("google-antigravity", "user@example.test", [
-				limit("google-antigravity", "account", "5h", "Gemini", 0.25, "ok"),
-				limit("google-antigravity", "account", "7d", "Gemini", 0.25, "ok"),
-				sharedLimit("anthropic", "5h"),
-				sharedLimit("openai", "5h"),
-				sharedLimit("anthropic", "7d"),
-				sharedLimit("openai", "7d"),
-			]),
-		];
+		const antigravity = report("google-antigravity", "user@example.test", [
+			limit("google-antigravity", "account", "5h", "Gemini", 0.25, "ok"),
+			limit("google-antigravity", "account", "7d", "Gemini", 0.25, "ok"),
+			sharedLimit("anthropic", "5h"),
+			sharedLimit("openai", "5h"),
+			sharedLimit("anthropic", "7d"),
+			sharedLimit("openai", "7d"),
+		]);
 
-		const windows = buildProviderCards(reports, now)[0].windows;
+		const windows = buildCredentialCard(antigravity, now).windows;
 
 		expect(windows.map(window => `${window.label} — ${window.windowTag}`).sort()).toEqual([
 			"Claude & GPT (shared) — 5h",
@@ -241,9 +183,10 @@ describe("UsageDashboardComponent", () => {
 	beforeAll(async () => {
 		await initTheme(false);
 	});
-	function dashboard(reports: UsageReport[]): UsageDashboardComponent {
+	function dashboard(usageReport: UsageReport): UsageDashboardComponent {
 		return new UsageDashboardComponent({
-			reports,
+			report: usageReport,
+			credentialLabel: "Work (#1)",
 			renderDetail: () => "",
 			loadActivity: async push => {
 				push([]);
@@ -253,44 +196,22 @@ describe("UsageDashboardComponent", () => {
 		});
 	}
 
-	it("keeps usable bars and matching label rows across multi-column cards", () => {
-		const component = dashboard([
+	it("keeps usable bars and matching label rows for the credential's windows", () => {
+		const component = dashboard(
 			report("anthropic", "a@test", [
 				limit("anthropic", "a", "7d", "Claude 7 Day", 0.9, "warning"),
 				limit("anthropic", "a", "fable", "Claude 7 Day (Fable)", 0.16, "ok"),
 			]),
-			report("openai", "a@test", [
-				limit("openai", "a", "5h", "Codex 5h", 0.4, "ok"),
-				limit("openai", "a", "7d", "Codex Weekly", 0.2, "ok"),
-			]),
-			report("google", "a@test", [
-				limit("google", "a", "5h", "Gemini 5h", 0.3, "ok"),
-				limit("google", "a", "7d", "Gemini Weekly", 0.1, "ok"),
-			]),
-		]);
+		);
 		try {
-			// Two stacked cards, two inline cards, then three stacked cards.
-			for (const [width, columns, stacked] of [
-				[72, 2, true],
-				[100, 2, false],
-				[120, 3, true],
-			] as const) {
-				const lines = component.render(width).map(line => Bun.stripANSI(line));
-				const labelLine = lines.find(line => line.includes("Claude 7 Day"))!;
-				expect(labelLine).toContain("Codex 5h");
-				expect(/[█░]/.test(labelLine)).toBe(!stacked);
-				const quotaLines = lines.filter(line => /[█░]/.test(line)).slice(0, 2);
-				expect(quotaLines).toHaveLength(2);
-				for (const line of quotaLines) {
-					const bars = [...line.matchAll(/[█░]+/g)];
-					expect(bars).toHaveLength(columns);
-					expect(bars[0][0].length).toBeGreaterThanOrEqual(12);
-					for (const bar of bars) expect(bar[0].length).toBe(bars[0][0].length);
-				}
-				expect(quotaLines[0]).toContain("10%");
-				expect(quotaLines[1]).toContain("84%");
-				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-			}
+			const lines = component.render(72).map(line => Bun.stripANSI(line));
+			const labelLine = lines.find(line => line.includes("Claude 7 Day"))!;
+			expect(labelLine).toBeDefined();
+			const quotaLines = lines.filter(line => /[█░]/.test(line));
+			expect(quotaLines).toHaveLength(2);
+			expect(quotaLines[0]).toContain("10%");
+			expect(quotaLines[1]).toContain("84%");
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(72);
 		} finally {
 			component.dispose();
 		}
@@ -298,12 +219,12 @@ describe("UsageDashboardComponent", () => {
 
 	it("sanitizes provider labels and duplicate-window tags before rendering", () => {
 		const label = "Claude\t7 Day\x1b[2J\x07\r\n(Fable)";
-		const component = dashboard([
+		const component = dashboard(
 			report("anthropic", "a@test", [
 				limit("anthropic", "a", "5\th", label, 0.4, "ok"),
 				limit("anthropic", "a", "7\nd", label, 0.2, "ok"),
 			]),
-		]);
+		);
 		try {
 			const lines = component.render(100);
 			for (const line of lines) {
@@ -322,16 +243,12 @@ describe("UsageDashboardComponent", () => {
 
 	it("bounds long quota labels while retaining suffixes and sibling bar alignment", () => {
 		const prefix = `Weekly ${"extended thinking ".repeat(1000)}`;
-		const component = dashboard([
+		const component = dashboard(
 			report("anthropic", "a@test", [
 				limit("anthropic", "a", "fable", `${prefix}(Fable)`, 0.9, "warning"),
 				limit("anthropic", "a", "mythos", `${prefix}(Mythos)`, 0.16, "ok"),
 			]),
-			report("openai", "a@test", [
-				limit("openai", "a", "5h", "Codex 5h", 0.4, "ok"),
-				limit("openai", "a", "7d", "Codex Weekly", 0.2, "ok"),
-			]),
-		]);
+		);
 		try {
 			const lines = component.render(72).map(line => Bun.stripANSI(line));
 			for (const suffix of ["(Fable)", "(Mythos)"]) expect(lines.join("\n")).toContain(suffix);
@@ -341,7 +258,6 @@ describe("UsageDashboardComponent", () => {
 			expect(bars).toHaveLength(2);
 			for (let index = 0; index < bars.length; index++) {
 				expect(bars[index] - starts[index]).toBeLessThanOrEqual(2);
-				expect([...lines[bars[index]].matchAll(/[█░]+/g)]).toHaveLength(2);
 			}
 			expect(lines.join("\n")).toContain("…");
 			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(72);
@@ -352,7 +268,7 @@ describe("UsageDashboardComponent", () => {
 
 	it("keeps all label characters when they fit the two-line cell budget", () => {
 		const label = "Claude 7 Day (Extended Thinking)";
-		const component = dashboard([report("anthropic", "a@test", [limit("anthropic", "a", "7d", label, 0.4, "ok")])]);
+		const component = dashboard(report("anthropic", "a@test", [limit("anthropic", "a", "7d", label, 0.4, "ok")]));
 		try {
 			const lines = component.render(24).map(line => Bun.stripANSI(line));
 			const first = lines.findIndex(line => line.includes("Claude"));
@@ -373,13 +289,12 @@ describe("UsageDashboardComponent", () => {
 		const now = Date.now();
 		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
 		const component = new UsageDashboardComponent({
-			reports: [
-				report("anthropic", "user@example.test", [
-					limit("anthropic", "account", "7d", "Claude 7 Day", 1, "exhausted", now + 3_600_000),
-					limit("anthropic", "account", "fable", "Claude 7 Day (Fable)", 0.16, "ok", now + 3_600_000),
-					limit("anthropic", "account", "extra", "Claude Extra Usage", 0.05, "ok"),
-				]),
-			],
+			report: report("anthropic", "user@example.test", [
+				limit("anthropic", "account", "7d", "Claude 7 Day", 1, "exhausted", now + 3_600_000),
+				limit("anthropic", "account", "fable", "Claude 7 Day (Fable)", 0.16, "ok", now + 3_600_000),
+				limit("anthropic", "account", "extra", "Claude Extra Usage", 0.05, "ok"),
+			]),
+			credentialLabel: "Work (#1)",
 			renderDetail: () => "",
 			loadActivity: async push => {
 				push([]);
@@ -405,7 +320,8 @@ describe("UsageDashboardComponent", () => {
 	it("renders specific error reason when activity loading fails instead of generic DB read error", async () => {
 		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
 		const component = new UsageDashboardComponent({
-			reports: [],
+			report: report("anthropic", "user@example.test", []),
+			credentialLabel: "Work (#1)",
 			renderDetail: () => "",
 			loadActivity: () => Promise.reject(new Error("worker spawn failed")),
 			requestRender: () => markRendered(),
@@ -422,7 +338,8 @@ describe("UsageDashboardComponent", () => {
 		const rawError = `subprocess crashed at ${home}/.omp/stats.db:\n\tfailed to open\x1b[2J\r\nline 2\x1b[31m...`;
 		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
 		const component = new UsageDashboardComponent({
-			reports: [],
+			report: report("anthropic", "user@example.test", []),
+			credentialLabel: "Work (#1)",
 			renderDetail: () => "",
 			loadActivity: () => Promise.reject(new Error(rawError)),
 			requestRender: () => markRendered(),

@@ -236,6 +236,8 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		remote = new RemoteAuthCredentialStore({ client, observedUsageFlushMs: 25 });
 
 		const at = Date.now();
+		const anthropicNull = { provider: "anthropic", credentialId: null } as const;
+		const codexNull = { provider: "openai-codex", credentialId: null } as const;
 		// Two requests for the same (provider, model) must merge into one entry;
 		// a second model produces its own entry in the same flush.
 		remote.recordObservedUsage([
@@ -276,8 +278,8 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			},
 		]);
 
-		await waitUntil(() => storage!.usage.clientSummary(0).clients.length === 1);
-		const summary = storage!.usage.clientSummary(0);
+		await waitUntil(() => storage!.usage.clientSummary(0, anthropicNull).clients.length === 1);
+		const summary = storage!.usage.clientSummary(0, anthropicNull);
 		const reported = summary.clients[0];
 		expect(reported.installId.length).toBeGreaterThan(0);
 		expect(reported.hostname).toBe(os.hostname());
@@ -294,7 +296,8 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			cacheWriteTokens: 15,
 		});
 		expect(anthropic?.costUsd).toBeCloseTo(1.5, 10);
-		expect(reported.providers.find(p => p.provider === "openai-codex")).toMatchObject({
+		const codexSummary = storage!.usage.clientSummary(0, codexNull);
+		expect(codexSummary.clients[0]?.providers.find(p => p.provider === "openai-codex")).toMatchObject({
 			requests: 1,
 			inputTokens: 30,
 		});
@@ -310,7 +313,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 		});
 		await waitUntil(() => {
-			const current = storage!.usage.clientSummary(0).clients[0];
+			const current = storage!.usage.clientSummary(0, anthropicNull).clients[0];
 			return current?.providers.find(p => p.provider === "anthropic")?.requests === 3;
 		});
 		// Two credentials of the same provider and model never fold into one
@@ -330,12 +333,19 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			usage: { input: 3, output: 1, cacheRead: 0, cacheWrite: 0 },
 			credentialId: 202,
 		});
-		await waitUntil(() => {
-			const current = storage!.usage.clientSummary(0).clients[0];
-			return current?.providers.find(p => p.provider === "anthropic")?.requests === 5;
-		});
+		// The two per-credential observes land in their own buckets, so the
+		// unattributed (null) bucket stays at 3 requests; poll the raw rows to
+		// let the 25ms flush land before asserting.
 		const rawDb = new Database(path.join(tempDir, "agent.db"), { readonly: true });
 		try {
+			await waitUntil(() => {
+				const rows = rawDb
+					.prepare(
+						"SELECT credential_id, requests FROM client_usage WHERE provider = 'anthropic' AND model = 'claude-x' AND credential_id IS NOT NULL ORDER BY credential_id",
+					)
+					.all() as Array<{ credential_id: number; requests: number }>;
+				return rows.length === 2;
+			});
 			const rows = rawDb
 				.prepare(
 					"SELECT credential_id, requests FROM client_usage WHERE provider = 'anthropic' AND model = 'claude-x' AND credential_id IS NOT NULL ORDER BY credential_id",
@@ -348,6 +358,10 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		} finally {
 			rawDb.close();
 		}
+		expect(
+			storage!.usage.clientSummary(0, anthropicNull).clients[0]?.providers.find(p => p.provider === "anthropic")
+				?.requests,
+		).toBe(3);
 
 		// An explicit identity (the auth-gateway attributing a caller) must
 		// produce its own client row instead of folding into this install.
@@ -367,8 +381,10 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			],
 			{ installId: "robomp-install", hostname: "robomp-box", app: "robomp" },
 		);
-		await waitUntil(() => storage!.usage.clientSummary(0).clients.length === 2);
-		const attributed = storage!.usage.clientSummary(0).clients.find(c => c.installId === "robomp-install");
+		await waitUntil(() => storage!.usage.clientSummary(0, anthropicNull).clients.length === 2);
+		const attributed = storage!.usage
+			.clientSummary(0, anthropicNull)
+			.clients.find(c => c.installId === "robomp-install");
 		expect(attributed?.hostname).toBe("robomp-box");
 		expect(attributed?.providers).toEqual([
 			{

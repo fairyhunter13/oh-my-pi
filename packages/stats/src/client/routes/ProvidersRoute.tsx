@@ -34,18 +34,25 @@ import { useSystemTheme } from "../useSystemTheme";
 export interface ProvidersRouteProps {
 	active: boolean;
 	range: TimeRange;
+	credential: string | null;
 	refreshTrigger: number;
 }
 
-export function ProvidersRoute({ active, range, refreshTrigger }: ProvidersRouteProps) {
+export function ProvidersRoute({ active, range, credential, refreshTrigger }: ProvidersRouteProps) {
 	const {
 		data: stats,
 		error,
 		loading,
-	} = useResource(["providers", range, refreshTrigger], signal => getProviderDashboardStats(range, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+	} = useResource(
+		["providers", range, credential, refreshTrigger],
+		signal => getProviderDashboardStats(range, credential as string, signal),
+		{
+			pollMs: 30000,
+			enabled: active && credential !== null,
+		},
+	);
+
+	if (!credential) return <EmptyState message="Pick a credential to see its numbers." />;
 
 	return (
 		<div className="stats-route-container space-y-6">

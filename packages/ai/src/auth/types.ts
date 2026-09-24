@@ -1160,8 +1160,8 @@ export interface UsageApi {
 	): Promise<UsageReport | null>;
 	/** Record one client’s observed usage report. */
 	recordClient(report: ClientUsageReport): boolean;
-	/** Aggregate client-observed usage since a timestamp. */
-	clientSummary(sinceMs: number): ClientUsageSummary;
+	/** Aggregate client-observed usage since a timestamp, for one credential (`credentialId: null` for unattributed). */
+	clientSummary(sinceMs: number, credential: { provider: string; credentialId: number | null }): ClientUsageSummary;
 	/**
 	 * The {@link UsageProvider} registered for `provider`, or undefined when the
 	 * provider has no usage endpoint at all. Lets callers tell "a credential we

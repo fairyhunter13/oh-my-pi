@@ -151,6 +151,33 @@ export interface DailyActivityPoint {
 }
 
 /**
+ * One credential in the stats DB: a stored `auth_credentials` row, or
+ * `credentialId: null` for usage no stored row produced (an environment key,
+ * a `models.yml` key, or a row written before this column existed).
+ */
+export interface StatsCredential {
+	provider: string;
+	credentialId: number | null;
+}
+
+/** Parse `"<provider>:<id>"` or `"<provider>:none"` into a {@link StatsCredential}. */
+export function parseStatsCredential(value: string | null | undefined): StatsCredential | undefined {
+	if (!value) return undefined;
+	const separator = value.lastIndexOf(":");
+	if (separator <= 0 || separator === value.length - 1) return undefined;
+	const provider = value.slice(0, separator);
+	const idPart = value.slice(separator + 1);
+	if (idPart === "none") return { provider, credentialId: null };
+	if (!/^\d+$/.test(idPart)) return undefined;
+	return { provider, credentialId: Number(idPart) };
+}
+
+/** Inverse of {@link parseStatsCredential}. */
+export function formatStatsCredential(credential: StatsCredential): string {
+	return `${credential.provider}:${credential.credentialId ?? "none"}`;
+}
+
+/**
  * Overall dashboard stats.
  */
 export interface DashboardStats {

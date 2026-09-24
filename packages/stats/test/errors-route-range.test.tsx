@@ -66,16 +66,20 @@ describe("ErrorsRoute range", () => {
 		root = createRoot(container as unknown as Element);
 
 		await act(async () => {
-			root?.render(<ErrorsRoute active range="24h" refreshTrigger={0} onRequestClick={() => {}} />);
+			root?.render(
+				<ErrorsRoute active range="24h" credential="anthropic:1" refreshTrigger={0} onRequestClick={() => {}} />,
+			);
 		});
-		expect(requestedUrls).toEqual(["/api/stats/errors?range=24h&limit=50"]);
+		expect(requestedUrls).toEqual(["/api/stats/errors?range=24h&limit=50&credential=anthropic%3A1"]);
 
 		await act(async () => {
-			root?.render(<ErrorsRoute active range="7d" refreshTrigger={0} onRequestClick={() => {}} />);
+			root?.render(
+				<ErrorsRoute active range="7d" credential="anthropic:1" refreshTrigger={0} onRequestClick={() => {}} />,
+			);
 		});
 		expect(requestedUrls).toEqual([
-			"/api/stats/errors?range=24h&limit=50",
-			"/api/stats/errors?range=7d&limit=50",
+			"/api/stats/errors?range=24h&limit=50&credential=anthropic%3A1",
+			"/api/stats/errors?range=7d&limit=50&credential=anthropic%3A1",
 		]);
 	});
 });

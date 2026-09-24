@@ -3,10 +3,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { getOverallStats } from "@oh-my-pi/omp-stats/db";
+import type { StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-sync-serial-");
+
+const OPENAI_CREDENTIAL: StatsCredential = { provider: "openai", credentialId: null };
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -52,8 +55,7 @@ describe("stats sync serial mode", () => {
 		const workerSpy = vi.spyOn(globalThis, "Worker");
 
 		const synced = await syncAllSessions({ workers: 1 });
-		const overall = getOverallStats();
-
+		const overall = getOverallStats(OPENAI_CREDENTIAL);
 		expect(synced.files).toBe(1);
 		expect(overall.totalRequests).toBe(1);
 		expect(workerSpy).not.toHaveBeenCalled();
@@ -63,8 +65,7 @@ describe("stats sync serial mode", () => {
 		await writeSessionFile({ includeCost: false });
 
 		const synced = await syncAllSessions({ workers: 1 });
-		const overall = getOverallStats();
-
+		const overall = getOverallStats(OPENAI_CREDENTIAL);
 		expect(synced).toEqual({ processed: 1, files: 1 });
 		expect(overall.totalRequests).toBe(1);
 		expect(overall.totalCost).toBeGreaterThan(0);
@@ -76,8 +77,7 @@ describe("stats sync serial mode", () => {
 		const workerSpy = vi.spyOn(globalThis, "Worker");
 
 		const synced = await syncAllSessions();
-		const overall = getOverallStats();
-
+		const overall = getOverallStats(OPENAI_CREDENTIAL);
 		expect(synced.files).toBe(1);
 		expect(overall.totalRequests).toBe(1);
 		expect(workerSpy).not.toHaveBeenCalled();

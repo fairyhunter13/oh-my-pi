@@ -29,10 +29,16 @@ export default class Usage extends Command {
 			default: false,
 		}),
 		days: Flags.integer({ char: "d", description: "History window in days (with --history or clients)", default: 7 }),
+		credential: Flags.string({
+			char: "c",
+			description:
+				"Credential to act on: <provider>/<id>, or <provider>/none for usage no stored credential produced (clients only)",
+		}),
 	};
 
 	static examples = [
-		"# Detailed per-account usage breakdown across all providers\n  omp usage",
+		"# Detailed usage breakdown for the one stored credential (asks when there is more than one)\n  omp usage",
+		"# A specific credential\n  omp usage --credential anthropic/3",
 		"# Only Anthropic accounts\n  omp usage --provider anthropic",
 		"# Redact account identifiers for screenshots\n  omp usage --redact",
 		"# Machine-readable output\n  omp usage --json",
@@ -51,6 +57,7 @@ export default class Usage extends Command {
 			redact: flags.redact,
 			history: flags.history,
 			days: flags.days,
+			credential: flags.credential,
 		});
 	}
 }

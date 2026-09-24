@@ -12,10 +12,11 @@ import {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CredentialSummary, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { startCredentialRefreshSweep } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
+import type { CredentialPickerTarget } from "@oh-my-pi/pi-tui/overlays/credential-picker";
 import type {
 	AutocompleteProvider,
 	Component,
@@ -6877,8 +6878,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleJobsCommand();
 	}
 
-	handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
-		return this.#commandController.handleUsageCommand(reports);
+	handleUsageCommand(): Promise<void> {
+		return this.#commandController.handleUsageCommand();
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {
@@ -7124,8 +7125,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSettingsSelector();
 	}
 
-	showUsageDashboard(reports: UsageReport[]): void {
-		this.#selectorController.showUsageDashboard(reports);
+	showUsageDashboard(options: { provider: string; row: CredentialSummary; report: UsageReport }): void {
+		this.#selectorController.showUsageDashboard(options);
 	}
 
 	showAdvisorConfigure(): void {
@@ -7189,6 +7190,16 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showCredentialLogout(providerId?: string): Promise<void> {
 		return this.#selectorController.showCredentialLogout(providerId);
+	}
+
+	pickCredential(options: {
+		verb: string;
+		rows: readonly CredentialSummary[];
+		newItem?: { label: string; description: string };
+		initialProvider?: string;
+		lockProvider?: boolean;
+	}): Promise<CredentialPickerTarget | undefined> {
+		return this.#selectorController.pickCredential(options);
 	}
 
 	showSessionPinSelector(): Promise<void> {

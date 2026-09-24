@@ -38,6 +38,7 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName.usage.subcommands).toContainEqual({
 			name: "show",
 			description: "Show provider usage and limits",
+			usage: "[provider/credential-id|provider/active]",
 		});
 		expect(byName.usage.subcommands).toContainEqual({
 			name: "reset",

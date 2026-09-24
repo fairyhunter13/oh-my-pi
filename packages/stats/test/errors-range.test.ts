@@ -53,26 +53,32 @@ describe("Recent Errors range", () => {
 		insertMessageStats([...recentErrors, oldError]);
 
 		const dayErrors = await readMessages(
-			await handleApi(new Request("http://stats.test/api/stats/errors?range=24h&limit=50")),
+			await handleApi(
+				new Request("http://stats.test/api/stats/errors?range=24h&limit=50&credential=openai-codex:none"),
+			),
 		);
 		expect(dayErrors).toHaveLength(50);
 		expect(dayErrors.map(error => error.entryId)).toEqual(recentErrors.map(error => error.entryId));
 		expect(dayErrors.some(error => error.entryId === oldError.entryId)).toBe(false);
 
 		const allErrors = await readMessages(
-			await handleApi(new Request("http://stats.test/api/stats/errors?range=all&limit=51")),
+			await handleApi(
+				new Request("http://stats.test/api/stats/errors?range=all&limit=51&credential=openai-codex:none"),
+			),
 		);
 		expect(allErrors).toHaveLength(51);
 		expect(allErrors.at(-1)?.entryId).toBe(oldError.entryId);
 
 		const defaultErrors = await readMessages(
-			await handleApi(new Request("http://stats.test/api/stats/errors?limit=51")),
+			await handleApi(new Request("http://stats.test/api/stats/errors?limit=51&credential=openai-codex:none")),
 		);
 		expect(defaultErrors).toHaveLength(50);
 		expect(defaultErrors.some(error => error.entryId === oldError.entryId)).toBe(false);
 
 		const fallbackErrors = await readMessages(
-			await handleApi(new Request("http://stats.test/api/stats/errors?range=unknown&limit=51")),
+			await handleApi(
+				new Request("http://stats.test/api/stats/errors?range=unknown&limit=51&credential=openai-codex:none"),
+			),
 		);
 		expect(fallbackErrors.map(error => error.entryId)).toEqual(defaultErrors.map(error => error.entryId));
 	});

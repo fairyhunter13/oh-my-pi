@@ -288,6 +288,7 @@ function extractStats(
 		errorMessage: msg.errorMessage ?? null,
 		usage,
 		agentType,
+		credentialId: typeof msg.credentialId === "number" ? msg.credentialId : null,
 	};
 }
 

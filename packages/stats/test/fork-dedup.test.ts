@@ -4,11 +4,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, getOverallStats, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
-import type { MessageStats } from "@oh-my-pi/omp-stats/types";
+import type { MessageStats, StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-fork-dedup-");
+
+const OPENAI_CREDENTIAL: StatsCredential = { provider: "openai", credentialId: null };
 
 interface AssistantOptions {
 	entryId: string;
@@ -129,11 +131,11 @@ describe("stats sync deduplicates forked-session entries", () => {
 		);
 		await syncAllSessions({ workers: 1 });
 
-		const assistantRequests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
+		const assistantRequests = getRecentRequests(OPENAI_CREDENTIAL, 10).filter(r => r.entryId === "asst01ab");
 		expect(assistantRequests).toHaveLength(1);
 		expect(assistantRequests[0].sessionFile).toBe(parentFile);
 
-		const overall = getOverallStats();
+		const overall = getOverallStats(OPENAI_CREDENTIAL);
 		expect(overall.totalRequests).toBe(1);
 		expect(overall.totalInputTokens).toBe(100);
 		expect(overall.totalOutputTokens).toBe(50);
@@ -170,7 +172,7 @@ describe("stats sync deduplicates forked-session entries", () => {
 
 		await syncAllSessions({ workers: 1 });
 
-		const overall = getOverallStats();
+		const overall = getOverallStats(OPENAI_CREDENTIAL);
 		expect(overall.totalRequests).toBe(2);
 		expect(overall.totalInputTokens).toBe(200);
 		expect(overall.totalOutputTokens).toBe(100);
@@ -235,10 +237,10 @@ describe("stats sync deduplicates forked-session entries", () => {
 
 		await initDb();
 
-		const messageRows = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
+		const messageRows = getRecentRequests(OPENAI_CREDENTIAL, 10).filter(r => r.entryId === "asst01ab");
 		expect(messageRows).toHaveLength(1);
 		expect(messageRows[0].sessionFile).toBe("/tmp/parent.jsonl");
-		const overall = getOverallStats();
+		const overall = getOverallStats(OPENAI_CREDENTIAL);
 		expect(overall.totalRequests).toBe(1);
 		expect(overall.totalCost).toBeCloseTo(0.003, 8);
 
@@ -246,7 +248,7 @@ describe("stats sync deduplicates forked-session entries", () => {
 		// surviving row.
 		closeDb();
 		await initDb();
-		expect(getOverallStats().totalRequests).toBe(1);
+		expect(getOverallStats(OPENAI_CREDENTIAL).totalRequests).toBe(1);
 	});
 
 	it("still upserts premium_requests for re-syncs of the same session file", async () => {
@@ -256,7 +258,7 @@ describe("stats sync deduplicates forked-session entries", () => {
 		const upgraded = { ...stat, usage: { ...stat.usage, premiumRequests: 1 } };
 		insertMessageStats([upgraded]);
 
-		const requests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
+		const requests = getRecentRequests(OPENAI_CREDENTIAL, 10).filter(r => r.entryId === "asst01ab");
 		expect(requests).toHaveLength(1);
 		expect(requests[0].usage.premiumRequests).toBe(1);
 	});

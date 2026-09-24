@@ -10,7 +10,9 @@
 import {
 	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 	type AuthAccountPolicy,
+	type AuthCredential,
 	type AuthStorage,
+	type CredentialSummary,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
 	resolveUsedFraction,
@@ -22,6 +24,7 @@ import {
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -44,6 +47,8 @@ export interface UsageCommandArgs {
 	history?: boolean;
 	/** History window in days (with `history` or the `clients` action). */
 	days?: number;
+	/** `<provider>/<id>`, or `<provider>/none` (valid only with the `clients` action). */
+	credential?: string;
 }
 
 /** Identity slice of a stored credential, for "every account" coverage. */
@@ -492,89 +497,6 @@ function formatMissingLimitLine(template: ProviderLimitTemplate, labelWidth: num
 	return `      ${chalk.dim("○")} ${padded}  ${chalk.dim("·".repeat(BAR_WIDTH))}  ${chalk.dim("not reported")}`;
 }
 
-/** Per-window capacity stat: how much account quota is burned and left. */
-export interface ProviderWindowStat {
-	/** Compact window label, e.g. "5h", "7d". */
-	window: string;
-	durationMs?: number;
-	/** Meter identity when a provider keeps independent meters in one window. */
-	meter?: string;
-	/** Accounts reporting a limit in this window. */
-	accounts: number;
-	/** Sum of each account's binding used fraction - accounts' worth of quota burned. */
-	usedAccounts: number;
-	/** Accounts' worth of quota still available across reporting accounts. */
-	remainingAccounts: number;
-}
-
-/**
- * Meter identity for a limit that holds its own quota pool inside a window. A model-scoped
- * allowance is a separate pool from the umbrella window it caps - `claude.ts` marks the Fable
- * weekly cap `tier` without `shared` precisely so it cannot gate Opus or Sonnet requests - and
- * reporting it separately keeps a spent scoped cap visible next to the umbrella remainder.
- * Only Anthropic and Codex use `tier` for such a pool; other providers (Copilot, Devin, Muse Code)
- * put the subscription plan there, which must not split one window per plan. Codex meters that
- * carry no tier fall back to the limit-id slug.
- */
-function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
-	if (report.provider !== "anthropic" && report.provider !== "openai-codex") return undefined;
-	const tier = limit.scope.tier?.trim().toLowerCase();
-	if (tier) return tier;
-	if (report.provider !== "openai-codex") return undefined;
-	const slug = limit.id.toLowerCase().split(":")[1];
-	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
-}
-
-/**
- * Aggregate one provider's reports into per-window quota capacity stats.
- *
- * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
- * account contributes its single highest used fraction. Limits that hold their
- * own pool inside a window keep their own bucket: a model-scoped tier cap, and
- * Codex chat versus Spark, which can share a window duration.
- */
-export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
-	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
-	for (const report of reports) {
-		const accountMax = new Map<string, number>();
-		for (const limit of report.limits) {
-			const fraction = resolveUsedFraction(limit);
-			if (fraction === undefined) continue;
-			const durationMs = limit.window?.durationMs;
-			const windowKey =
-				durationMs !== undefined ? `d:${durationMs}` : (limit.scope.windowId ?? limit.window?.label ?? limit.label);
-			const meter = meterForLimit(report, limit);
-			const key = meter === undefined ? windowKey : `m:${meter}\0${windowKey}`;
-			const previous = accountMax.get(key);
-			if (previous === undefined || fraction > previous) accountMax.set(key, fraction);
-			if (!buckets.has(key)) {
-				const window =
-					durationMs !== undefined
-						? formatDuration(durationMs)
-						: (limit.window?.label ?? limit.scope.windowId ?? limit.label);
-				buckets.set(key, { window, durationMs, meter, fractions: [] });
-			}
-		}
-		for (const [key, fraction] of accountMax) buckets.get(key)!.fractions.push(fraction);
-	}
-	return [...buckets.values()]
-		.sort((a, b) => {
-			const duration = (a.durationMs ?? Number.POSITIVE_INFINITY) - (b.durationMs ?? Number.POSITIVE_INFINITY);
-			return duration !== 0 ? duration : (a.meter ?? "").localeCompare(b.meter ?? "");
-		})
-		.map(bucket => {
-			const usedAccounts = bucket.fractions.reduce((sum, fraction) => sum + fraction, 0);
-			return {
-				window: bucket.window,
-				durationMs: bucket.durationMs,
-				...(bucket.meter === undefined ? {} : { meter: bucket.meter }),
-				accounts: bucket.fractions.length,
-				usedAccounts,
-				remainingAccounts: Math.max(0, bucket.fractions.length - usedAccounts),
-			};
-		});
-}
-
 /** Re-login warnings render once remaining grant life drops below this. */
 const RELOGIN_WARN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -835,15 +757,6 @@ export function formatUsageBreakdown(
 			const warning = formatReloginDeadline(account, nowMs, redaction);
 			if (warning) lines.push(warning);
 		}
-
-		const stats = computeProviderWindowStats(providerReports);
-		if (stats.length > 0) {
-			const parts = stats.map(stat => {
-				const meterLabel = stat.meter ? ` (${stat.meter.charAt(0).toUpperCase()}${stat.meter.slice(1)})` : "";
-				return `${stat.window}${meterLabel} → ${stat.usedAccounts.toFixed(2)}/${stat.accounts} ${stat.accounts === 1 ? "account" : "accounts"} used (${stat.remainingAccounts.toFixed(2)}× quota left)`;
-			});
-			lines.push(`  ${chalk.dim(`capacity: ${parts.join(" · ")}`)}`);
-		}
 	}
 
 	return lines.join("\n");
@@ -988,53 +901,87 @@ export function formatUsageHistory(
 	return lines.join("\n");
 }
 
-function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	const accounts: UsageAccountIdentity[] = [];
-	const all = authStorage.credentials.all();
-	for (const provider in all) {
-		const entry = all[provider];
-		const credentials = Array.isArray(entry) ? entry : [entry];
-		for (const credential of credentials) {
-			if (credential.type === "oauth") {
-				accounts.push({
-					provider,
-					type: "oauth",
-					email: credential.email,
-					accountId: credential.accountId,
-					projectId: credential.projectId,
-					enterpriseUrl: credential.enterpriseUrl,
-					orgId: credential.orgId,
-					orgName: credential.orgName,
-					authorizedAt: credential.authorizedAt,
-				});
-			} else {
-				accounts.push({ provider, type: "api_key" });
-			}
-		}
+/** Map one stored credential to its identity slice, for a single-credential view. */
+function credentialToAccountIdentity(provider: string, credential: AuthCredential): UsageAccountIdentity {
+	if (credential.type === "oauth") {
+		return {
+			provider,
+			type: "oauth",
+			email: credential.email,
+			accountId: credential.accountId,
+			projectId: credential.projectId,
+			enterpriseUrl: credential.enterpriseUrl,
+			orgId: credential.orgId,
+			orgName: credential.orgName,
+			authorizedAt: credential.authorizedAt,
+		};
 	}
-	return accounts;
+	return { provider, type: "api_key" };
 }
 
+/** One stored credential, or the `<provider>/none` "unattributed" choice `clients` accepts. */
+export type UsageCredentialTarget =
+	| { provider: string; row: CredentialSummary }
+	| { provider: string; credentialId: null };
+
 /**
- * Keep only accounts worth a usage row: those whose provider has a usage
- * provider, so a missing report is a real gap rather than the absence of any
- * usage concept. Providers with no usage endpoint (web-search keys, local /
- * keyless servers, inference providers without a usage API) would only ever
- * render as noise, so they are dropped.
- *
- * `hasUsageProvider` is injected (in practice {@link AuthStorage.usage.providerFor})
- * so custom/broker resolvers stay authoritative — no provider list is duplicated
- * here. An explicit `--provider` request bypasses the cull, so
- * `omp usage --provider xai` can still confirm the stored credential has no
- * usage endpoint.
+ * Resolve the one credential the live view, `--history` and `clients` act
+ * on: the `--credential <provider>/<id>` flag (or `<provider>/none`, only
+ * when `allowNone` is set) when given, else the sole reportable candidate.
+ * With more than one candidate and no flag, the string result is a "pick
+ * one" message — the caller prints it to stderr and exits 2, never guesses.
  */
-export function selectReportableAccounts(
-	accounts: UsageAccountIdentity[],
-	hasUsageProvider: (provider: string) => boolean,
-	explicitProvider?: string,
-): UsageAccountIdentity[] {
-	if (explicitProvider) return accounts;
-	return accounts.filter(account => hasUsageProvider(account.provider));
+export function resolveUsageCredential(
+	authStorage: AuthStorage,
+	arg: string | undefined,
+	provider: string | undefined,
+	options: { allowNone: true },
+): UsageCredentialTarget | string;
+export function resolveUsageCredential(
+	authStorage: AuthStorage,
+	arg?: string,
+	provider?: string,
+	options?: { allowNone?: false },
+): { provider: string; row: CredentialSummary } | string;
+export function resolveUsageCredential(
+	authStorage: AuthStorage,
+	arg: string | undefined,
+	provider?: string,
+	options?: { allowNone?: boolean },
+): UsageCredentialTarget | string {
+	if (arg !== undefined) {
+		const slash = arg.indexOf("/");
+		if (slash < 0) return `"${arg}" is not "<provider>/<credential id>" or "<provider>/none".`;
+		const argProvider = arg.slice(0, slash).toLowerCase();
+		const idPart = arg.slice(slash + 1);
+		if (idPart === "none") {
+			if (!options?.allowNone) {
+				return `"${arg}" is not valid here: "<provider>/none" is only accepted by \`omp usage clients\`.`;
+			}
+			return { provider: argProvider, credentialId: null };
+		}
+		const id = Number.parseInt(idPart, 10);
+		if (!Number.isInteger(id)) return `"${arg}" is not "<provider>/<credential id>" or "<provider>/none".`;
+		const row = authStorage.listCredentials(argProvider).find(entry => entry.id === id);
+		if (!row) return `No stored credential matches "${arg}".`;
+		return { provider: argProvider, row };
+	}
+	const wantedProvider = provider?.toLowerCase();
+	const candidates = authStorage
+		.listCredentials()
+		.filter(row => row.disabled === null && authStorage.usage.providerFor(row.provider) !== undefined)
+		.filter(row => wantedProvider === undefined || row.provider.toLowerCase() === wantedProvider);
+	if (candidates.length === 1) return { provider: candidates[0].provider, row: candidates[0] };
+	if (candidates.length === 0) {
+		return wantedProvider
+			? `No stored credential for provider "${wantedProvider}" has a usage endpoint.`
+			: "No stored credential has a usage endpoint. Use /login to add one.";
+	}
+	const lines = candidates.map(
+		row =>
+			`  ${row.provider}/${row.id}  ${credentialName(row)}  (${row.kind === "oauth" ? "subscription" : "API key"})`,
+	);
+	return `Pick a credential with --credential <provider>/<id>:\n${lines.join("\n")}`;
 }
 
 /** Apply a redaction mask to an optional identity field. */
@@ -1083,8 +1030,14 @@ function formatTokenCount(value: number): string {
  * per-client total. Data comes from broker `/v1/usage/clients` or the local
  * agent DB when this machine hosts the broker.
  */
-export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: number, nowMs: number): string {
+export function formatClientUsage(
+	clients: ClientUsageClientSummary[],
+	sinceMs: number,
+	nowMs: number,
+	credentialLabel: string,
+): string {
 	const lines: string[] = [];
+	lines.push(chalk.bold(`Credential: ${credentialLabel}`));
 	lines.push(chalk.bold(`Per-client token burn since ${new Date(sinceMs).toISOString().slice(0, 10)}`));
 	const headers = ["app", "provider", "requests", "input", "output", "cache r", "cache w", "total", "est cost"];
 	for (const client of clients) {
@@ -1155,6 +1108,15 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 		if (cmd.action === "clients") {
+			const target = resolveUsageCredential(authStorage, cmd.credential, cmd.provider, { allowNone: true });
+			if (typeof target === "string") {
+				process.stderr.write(`${chalk.yellow(target)}\n`);
+				process.exitCode = 2;
+				return;
+			}
+			const credentialId = "row" in target ? target.row.id : target.credentialId;
+			const credentialLabel =
+				"row" in target ? `${credentialName(target.row)} (#${target.row.id})` : `${target.provider} · unattributed`;
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
@@ -1164,31 +1126,52 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			let clients: ClientUsageClientSummary[];
 			if (brokerConfig) {
 				const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
-				clients = (await client.fetchClientUsageSummary({ sinceMs })).clients;
+				clients = (await client.fetchClientUsageSummary({ sinceMs, provider: target.provider, credentialId }))
+					.clients;
 			} else {
-				clients = authStorage.usage.clientSummary(sinceMs).clients;
+				clients = authStorage.usage.clientSummary(sinceMs, { provider: target.provider, credentialId }).clients;
 			}
 			if (cmd.json) {
-				process.stdout.write(`${JSON.stringify({ generatedAt: nowMs, sinceMs, clients }, null, 2)}\n`);
+				process.stdout.write(
+					`${JSON.stringify({ generatedAt: nowMs, sinceMs, credential: credentialLabel, clients }, null, 2)}\n`,
+				);
 				return;
 			}
 			if (clients.length === 0) {
 				process.stderr.write(
 					chalk.yellow(
-						"No per-client usage recorded yet. Broker-connected clients and the auth-gateway report token burn automatically; set OMP_AUTH_BROKER_URL (or run this on the broker host).\n",
+						`Credential: ${credentialLabel}\nNo per-client usage recorded yet. Broker-connected clients and the auth-gateway report token burn automatically; set OMP_AUTH_BROKER_URL (or run this on the broker host).\n`,
 					),
 				);
 				process.exitCode = 1;
 				return;
 			}
-			process.stdout.write(`${formatClientUsage(clients, sinceMs, nowMs)}\n`);
+			process.stdout.write(`${formatClientUsage(clients, sinceMs, nowMs, credentialLabel)}\n`);
 			return;
 		}
 		if (cmd.history) {
+			const target = resolveUsageCredential(authStorage, cmd.credential, cmd.provider);
+			if (typeof target === "string") {
+				process.stderr.write(`${chalk.yellow(target)}\n`);
+				process.exitCode = 2;
+				return;
+			}
+			if (target.row.kind === "api_key") {
+				process.stderr.write(chalk.yellow("No usage history is recorded for an API key.\n"));
+				process.exitCode = 1;
+				return;
+			}
+			const stored = authStorage.credentials.list(target.provider).find(entry => entry.id === target.row.id);
+			const identity = stored?.credential.type === "oauth" ? stored.credential : undefined;
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
-			const entries = authStorage.usage.history({ sinceMs, provider: cmd.provider?.toLowerCase() });
+			const allEntries = authStorage.usage.history({ sinceMs, provider: target.provider });
+			const entries = allEntries.filter(
+				entry =>
+					(identity?.email !== undefined && entry.email === identity.email) ||
+					(identity?.accountId !== undefined && entry.accountId === identity.accountId),
+			);
 			const redaction = cmd.redact ? buildRedactionMap(collectHistoryIdentityStrings(entries)) : undefined;
 			if (cmd.json) {
 				const masked = redaction
@@ -1203,10 +1186,9 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				return;
 			}
 			if (entries.length === 0) {
-				const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
 				process.stderr.write(
 					chalk.yellow(
-						`No usage history recorded${scope} yet. Snapshots accumulate whenever usage is fetched (TUI footer, /usage, omp usage).\n`,
+						`No usage history recorded for ${credentialName(target.row)} (#${target.row.id}) yet. Snapshots accumulate whenever usage is fetched (TUI footer, /usage, omp usage).\n`,
 					),
 				);
 				process.exitCode = 1;
@@ -1215,45 +1197,56 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			process.stdout.write(`${formatUsageHistory(entries, sinceMs, nowMs, redaction)}\n`);
 			return;
 		}
+
+		const target = resolveUsageCredential(authStorage, cmd.credential, cmd.provider);
+		if (typeof target === "string") {
+			process.stderr.write(`${chalk.yellow(target)}\n`);
+			process.exitCode = 2;
+			return;
+		}
+		const stored = authStorage.credentials.list(target.provider).find(entry => entry.id === target.row.id);
+		if (!stored) {
+			process.stderr.write(chalk.yellow(`No stored credential matches "${target.provider}/${target.row.id}".\n`));
+			process.exitCode = 1;
+			return;
+		}
 		const policyOptions: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: cfgRetryUsageReservePct.get(settings),
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = new ModelRegistry(authStorage);
-		const reports =
-			(await authStorage.usage.reports({
-				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
-			})) ?? [];
-		// Reports are always fresh (broker-side fetch) but the account list can
+		const thatAccount = credentialToAccountIdentity(target.provider, stored.credential);
+		// Reports are always fresh (broker-side fetch); the credential row can
 		// come from a disk-cached snapshot up to an hour old — revalidate so a
-		// just-logged-in (or just-rotated-identity) credential isn't rendered
-		// as a stale duplicate. Best-effort: offline broker keeps the cache.
+		// just-logged-in (or just-rotated-identity) row isn't rendered stale.
+		// Best-effort: offline broker keeps the cache.
 		try {
 			await authStorage.credentials.revalidate();
 		} catch {
 			// Stale identities beat no output.
 		}
-		const storedAccounts = collectStoredAccounts(authStorage);
-		let accounts = selectReportableAccounts(
-			storedAccounts,
-			provider => authStorage.usage.providerFor(provider) !== undefined,
-			cmd.provider,
-		);
-		// Tombstones ride alongside the live pool so an auto-disabled account
-		// (e.g. an expired Anthropic grant) is loudly visible instead of just
-		// missing. Best-effort: a broker predating the endpoint yields [].
+		let report: UsageReport | null;
+		try {
+			report = await authStorage.usage.report(target.provider, stored.credential, {
+				baseUrl: modelRegistry.getProviderBaseUrl(target.provider),
+				signal: AbortSignal.timeout(15_000),
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			process.stderr.write(chalk.yellow(`Failed to fetch usage data: ${message}\n`));
+			process.exitCode = 1;
+			return;
+		}
+		const filteredReports = report ? [report] : [];
+		const accounts = [thatAccount];
+		// Tombstones ride alongside this one row so its own auto-disable (e.g.
+		// an expired Anthropic grant) is loudly visible instead of just missing.
+		// Best-effort: a broker predating the endpoint yields [].
 		let disabled: DisabledCredentialSummary[] = [];
 		try {
-			disabled = await authStorage.credentials.listDisabled();
+			disabled = (await authStorage.credentials.listDisabled()).filter(summary => summary.id === target.row.id);
 		} catch {
 			// Usage output must not fail because tombstone listing did.
-		}
-		let filteredReports = reports;
-		if (cmd.provider) {
-			const wanted = cmd.provider.toLowerCase();
-			filteredReports = reports.filter(report => report.provider.toLowerCase() === wanted);
-			accounts = accounts.filter(account => account.provider.toLowerCase() === wanted);
-			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
 
 		const redaction = cmd.redact
@@ -1277,12 +1270,6 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					orgName: maskIdentity(redaction, account.orgName),
 				}));
 			}
-			const capacity: Record<string, ProviderWindowStat[]> = {};
-			for (const report of filteredReports) {
-				if (capacity[report.provider]) continue;
-				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
-				if (stats.length > 0) capacity[report.provider] = stats;
-			}
 			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
@@ -1298,22 +1285,8 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				reports: trimmed,
 				accountsWithoutUsage: unreportedAccounts,
 				disabledCredentials: disabledForJson,
-				capacity,
 			};
 			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
-			return;
-		}
-
-		if (filteredReports.length === 0 && accounts.length === 0) {
-			const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
-			// Credentials exist but every one is for a provider without a usage
-			// endpoint — say so rather than implying nothing is logged in.
-			const message =
-				storedAccounts.length > 0
-					? `No usage data${scope}. Stored credentials are for providers without a usage endpoint.\n`
-					: `No credentials found${scope}. Run \`omp\` and use /login to add accounts.\n`;
-			process.stderr.write(chalk.yellow(message));
-			process.exitCode = 1;
 			return;
 		}
 
