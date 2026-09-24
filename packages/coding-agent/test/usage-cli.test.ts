@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { AuthStorage, SqliteAuthCredentialStore, type UsageReport } from "@oh-my-pi/pi-ai";
+import { buildUsageCredential, usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
 import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -951,5 +952,172 @@ describe("runUsageCommand exit code (F11)", () => {
 			}
 			resetSettingsForTest();
 		}
+	});
+});
+describe("runUsageCommand --history and live view for a disabled/org-scoped credential (C-2/C-3/F6)", () => {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
+	function withCapturedStreams<T>(run: () => Promise<T>): Promise<{ result: T; stdout: string; stderr: string }> {
+		const stdoutChunks: string[] = [];
+		const stderrChunks: string[] = [];
+		const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+		const originalStderrWrite = process.stderr.write.bind(process.stderr);
+		// biome-ignore lint/suspicious/noExplicitAny: capturing the real write's overloaded signature
+		process.stdout.write = ((chunk: string) => {
+			stdoutChunks.push(stripVTControlCharacters(String(chunk)));
+			return true;
+		}) as typeof process.stdout.write;
+		// biome-ignore lint/suspicious/noExplicitAny: capturing the real write's overloaded signature
+		process.stderr.write = ((chunk: string) => {
+			stderrChunks.push(stripVTControlCharacters(String(chunk)));
+			return true;
+		}) as typeof process.stderr.write;
+		return run()
+			.then(result => ({ result, stdout: stdoutChunks.join(""), stderr: stderrChunks.join("") }))
+			.finally(() => {
+				process.stdout.write = originalStdoutWrite;
+				process.stderr.write = originalStderrWrite;
+			});
+	}
+
+	async function withTempAgentDir<T>(run: (tempDir: TempDir) => Promise<T>): Promise<T> {
+		using tempDir = TempDir.createSync("@omp-usage-disabled-org-");
+		setAgentDir(tempDir.path());
+		resetSettingsForTest();
+		const originalExitCode = process.exitCode;
+		try {
+			return await run(tempDir);
+		} finally {
+			process.exitCode = originalExitCode ?? 0;
+			if (originalAgentDir) setAgentDir(originalAgentDir);
+			else {
+				setAgentDir(fallbackAgentDir);
+				delete process.env.PI_CODING_AGENT_DIR;
+			}
+			resetSettingsForTest();
+		}
+	}
+
+	it("C-3/F6: --history filtered to one org row of a shared email never leaks the sibling org's snapshots", async () => {
+		await withTempAgentDir(async tempDir => {
+			const store = await SqliteAuthCredentialStore.open(path.join(tempDir.path(), "agent.db"));
+			const seedStorage = new AuthStorage(store);
+			await seedStorage.credentials.upsert("anthropic", {
+				type: "oauth",
+				access: "access-org-a",
+				refresh: "refresh-org-a",
+				expires: Date.now() + 60_000,
+				email: "shared@example.test",
+				orgId: "org-a",
+				orgName: "Org A",
+			});
+			await seedStorage.credentials.upsert("anthropic", {
+				type: "oauth",
+				access: "access-org-b",
+				refresh: "refresh-org-b",
+				expires: Date.now() + 60_000,
+				email: "shared@example.test",
+				orgId: "org-b",
+				orgName: "Org B",
+			});
+			await seedStorage.credentials.reload();
+			const rows = seedStorage.listCredentials("anthropic");
+			const rowA = rows.find(row => row.identity?.includes("org-a") || row.label?.includes("Org A")) ?? rows[0]!;
+			const rowB = rows.find(row => row.id !== rowA.id)!;
+			const storedA = seedStorage.credentials.list("anthropic").find(entry => entry.id === rowA.id)!.credential;
+			const storedB = seedStorage.credentials.list("anthropic").find(entry => entry.id === rowB.id)!.credential;
+			const keyA = usageCacheIdentity(buildUsageCredential(storedA));
+			const keyB = usageCacheIdentity(buildUsageCredential(storedB));
+			expect(keyA).not.toBe(keyB);
+
+			const now = Date.now();
+			store.recordUsageSnapshots([
+				{
+					recordedAt: now,
+					provider: "anthropic",
+					accountKey: keyA,
+					email: "shared@example.test",
+					limitId: "anthropic:5h",
+					label: "Session",
+					usedFraction: 0.11,
+					status: "ok",
+				},
+				{
+					recordedAt: now,
+					provider: "anthropic",
+					accountKey: keyB,
+					email: "shared@example.test",
+					limitId: "anthropic:5h",
+					label: "Session",
+					usedFraction: 0.99,
+					status: "ok",
+				},
+			]);
+			seedStorage.close();
+
+			const { stdout } = await withCapturedStreams(() =>
+				runUsageCommand({ history: true, credential: `anthropic/${rowA.id}`, json: true }),
+			);
+			const payload = JSON.parse(stdout) as { entries: Array<{ usedFraction?: number; accountKey: string }> };
+			expect(payload.entries).toHaveLength(1);
+			expect(payload.entries[0]?.usedFraction).toBe(0.11);
+			expect(payload.entries[0]?.accountKey).toBe(keyA);
+		});
+	});
+
+	it("C-2: a disabled named credential resolves instead of 'No stored credential matches', in both the live view and --history", async () => {
+		await withTempAgentDir(async tempDir => {
+			const store = await SqliteAuthCredentialStore.open(path.join(tempDir.path(), "agent.db"));
+			const seedStorage = new AuthStorage(store);
+			const upserted = await seedStorage.credentials.upsert("anthropic", {
+				type: "oauth",
+				access: "access-disabled",
+				refresh: "refresh-disabled",
+				expires: Date.now() + 60_000,
+				email: "disabled@example.test",
+			});
+			await seedStorage.credentials.reload();
+			const id = upserted[0]!.id;
+			await seedStorage.credentials.disable(id, "test-disabled");
+			const storedCredential = seedStorage.credentialById(id);
+			if (!storedCredential) throw new Error("credentialById did not find the disabled row");
+			const accountKey = usageCacheIdentity(buildUsageCredential(storedCredential));
+			store.recordUsageSnapshots([
+				{
+					recordedAt: Date.now(),
+					provider: "anthropic",
+					accountKey,
+					email: "disabled@example.test",
+					limitId: "anthropic:5h",
+					label: "Session",
+					usedFraction: 0.5,
+					status: "ok",
+				},
+			]);
+			seedStorage.close();
+
+			// --history: reads the catalog row instead of the enabled-only pool.
+			const { stdout: historyStdout } = await withCapturedStreams(() =>
+				runUsageCommand({ history: true, credential: `anthropic/${id}`, json: true }),
+			);
+			const historyPayload = JSON.parse(historyStdout) as { entries: unknown[] };
+			expect(historyPayload.entries).toHaveLength(1);
+
+			// Live view: the network is stubbed to fail deterministically. The
+			// regression this proves is credential resolution — before the fix,
+			// a disabled row never reached the fetch attempt at all, because
+			// `credentials.list` (enabled-only) missed it and the command
+			// printed "No stored credential matches" and returned early.
+			const originalFetch = globalThis.fetch;
+			globalThis.fetch = (() =>
+				Promise.reject(new Error("network disabled in test"))) as unknown as typeof globalThis.fetch;
+			try {
+				const { stderr } = await withCapturedStreams(() => runUsageCommand({ credential: `anthropic/${id}` }));
+				expect(stderr).not.toContain("No stored credential matches");
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		});
 	});
 });
