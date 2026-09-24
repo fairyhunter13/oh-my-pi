@@ -510,7 +510,9 @@ export class CredentialSelector {
 			this.#deps.pool
 				.credentials(provider)
 				.map((credential, index) => ({ credential, index }))
-				.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth"),
+				.filter(
+					(entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth",
+				),
 			options?.accountIds,
 		);
 		this.#deps.policies.validateFor(
@@ -548,13 +550,17 @@ export class CredentialSelector {
 		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
 		const checkUsage =
 			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
-		// The strict pin, else the provider default, is the session preference before any ranking.
+		// The strict pin, else this session's own sticky row, else the provider default, is the
+		// session preference before any ranking (SessionAffinity.preferred). `preferred()` itself
+		// carries no timestamp, so `lastUsedAtMs` for the warm-window check below is always read
+		// from the raw sticky record — the one place staleness lives.
 		const preferred = this.#deps.affinity.preferred(provider, sessionId);
 		const pinned = this.#deps.affinity.strictPin(provider, sessionId) !== undefined;
+		const rawSticky = this.#deps.affinity.get(provider, sessionId);
 		const sessionCredential =
 			preferred?.type === "oauth"
-				? { ...preferred, ...(pinned ? { explicit: true as const } : {}) }
-				: this.#deps.affinity.get(provider, sessionId);
+				? { ...preferred, lastUsedAtMs: rawSticky?.lastUsedAtMs, ...(pinned ? { explicit: true as const } : {}) }
+				: rawSticky;
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined

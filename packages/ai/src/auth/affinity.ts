@@ -314,15 +314,36 @@ export class SessionAffinity implements SessionsApi {
 
 	/**
 	 * The row a session takes before any usage ranking: its strict pin, else the
-	 * provider's enabled default. Undefined when neither names a loaded row.
+	 * row that already served this session (its sticky choice), else the
+	 * provider's enabled default. Undefined when none names a loaded row.
+	 *
+	 * The default applies only to a session that has not yet served a request
+	 * for this provider — once a session has a sticky row, a later default
+	 * change must not move it (Hafiz's rule: nothing in one session moves
+	 * another running session's credential). A usage-limit or auth-failure
+	 * rotation still moves an unpinned session, because rotation clears that
+	 * session's own sticky entry first ({@link SessionAffinity.clear}), so the
+	 * next call here falls through past the now-absent sticky row.
 	 */
 	preferred(
 		provider: string,
 		sessionId: string | undefined,
 	): { type: AuthCredential["type"]; index: number; credentialId: number } | undefined {
-		const id = this.strictPin(provider, sessionId) ?? this.#store.credentialCatalog?.defaultId(provider);
-		if (id === undefined) return undefined;
 		const stored = this.#pool.entries(provider);
+		const pinnedId = this.strictPin(provider, sessionId);
+		if (pinnedId !== undefined) {
+			const index = stored.findIndex(entry => entry.id === pinnedId);
+			return index === -1 ? undefined : { type: stored[index]!.credential.type, index, credentialId: pinnedId };
+		}
+		const sticky = this.get(provider, sessionId);
+		if (sticky?.credentialId !== undefined) {
+			const index = stored.findIndex(entry => entry.id === sticky.credentialId);
+			if (index !== -1) {
+				return { type: stored[index]!.credential.type, index, credentialId: sticky.credentialId };
+			}
+		}
+		const id = this.#store.credentialCatalog?.defaultId(provider);
+		if (id === undefined) return undefined;
 		const index = stored.findIndex(entry => entry.id === id);
 		return index === -1 ? undefined : { type: stored[index]!.credential.type, index, credentialId: id };
 	}

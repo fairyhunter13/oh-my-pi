@@ -54,36 +54,38 @@ describe("AuthStorage: each session keeps its own credential", () => {
 		expect(await auth.keys.get(PROVIDER, "session-b")).toBe("sk-b");
 	});
 
-	test("a default change moves neither a pinned session nor an adopted (settled) one, and only a fresh session sees it", async () => {
+	test("a default change moves neither a pinned session nor a sticky one, and only a fresh session sees it", async () => {
 		await auth.credentials.upsert(PROVIDER, oauthCredential("a"));
 		await auth.credentials.upsert(PROVIDER, oauthCredential("b"));
 		await auth.credentials.reload();
 		const rows = auth.listCredentials(PROVIDER);
 		const rowA = rows.find(row => row.identity === "a@example.com")!.id;
 		const rowB = rows.find(row => row.identity === "b@example.com")!.id;
-		// Start the default on row B, so a session that resolves without a pin lands there.
-		auth.setDefaultCredential(PROVIDER, rowB);
 
-		// A strict pin, off the current default, on row A.
+		// A strict pin, on row A, serves that session regardless of the default.
 		expect(auth.pinSessionCredential(PROVIDER, "pinned-session", rowA)).toBe(true);
 		const pinnedBefore = await auth.keys.get(PROVIDER, "pinned-session");
 		expect(pinnedBefore).toContain("access-a");
 
-		// No pin yet: an unpinned resolve follows the LIVE default (row B here) on every
-		// call — that is what "default" means. `sessions.adopt` is the operator's own
-		// "keep me here" moment (the turn-completion hook in the real coding agent, or
-		// `/session pin` implicitly), promoting the row that just served into a durable
-		// pin so this settled session stops tracking the default from here on.
-		const settledBefore = await auth.keys.get(PROVIDER, "settled-session");
-		expect(settledBefore).toContain("access-b");
-		expect(auth.sessions.adopt(PROVIDER, "settled-session")).toBe(rowB);
+		// Two UNPINNED sessions, each served once while a different row was the live default —
+		// that first serve is what records their own sticky row.
+		auth.setDefaultCredential(PROVIDER, rowA);
+		const stickyABefore = await auth.keys.get(PROVIDER, "sticky-session-a");
+		expect(stickyABefore).toContain("access-a");
+		auth.setDefaultCredential(PROVIDER, rowB);
+		const stickyBBefore = await auth.keys.get(PROVIDER, "sticky-session-b");
+		expect(stickyBBefore).toContain("access-b");
 
-		// The default moves to the OTHER row. Neither the pinned nor the settled session moves.
+		// The default moves again, to row A. Nothing already running moves: the pinned session
+		// keeps its pin, sticky-session-a happens to still match the new default (its own sticky
+		// row, not the default, is what keeps it there), and sticky-session-b — whose sticky row
+		// now DIFFERS from the new default — proves the point: it stays on row B.
 		auth.setDefaultCredential(PROVIDER, rowA);
 		expect(await auth.keys.get(PROVIDER, "pinned-session")).toBe(pinnedBefore);
-		expect(await auth.keys.get(PROVIDER, "settled-session")).toBe(settledBefore);
+		expect(await auth.keys.get(PROVIDER, "sticky-session-a")).toBe(stickyABefore);
+		expect(await auth.keys.get(PROVIDER, "sticky-session-b")).toBe(stickyBBefore);
 
-		// A brand-new session, with no pin and never adopted, sees the new default at once.
+		// A brand-new session, never served, sees the current default at once.
 		expect(await auth.keys.get(PROVIDER, "new-session")).toContain("access-a");
 	});
 

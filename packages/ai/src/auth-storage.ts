@@ -405,8 +405,10 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Only a user choice marks a row: the pin, else the default. Ranking and the sticky never do.
-	 * A runtime override marks nothing; a config key that counts hides the default, not the pin.
+	 * A user's own choice marks a row: the pin, else the row already serving this session (its
+	 * sticky choice — a later default change must not move it), else the provider default.
+	 * Ranking beyond that never marks a row. A runtime override marks nothing; a config key
+	 * that counts hides the default, not the pin.
 	 */
 	#credentialMarks(provider: string, sessionId: string | undefined): { activeId?: number; pinnedId?: number } {
 		if (!sessionId || this.#overrides.hasRuntime(provider)) return {};
