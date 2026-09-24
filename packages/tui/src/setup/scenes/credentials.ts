@@ -263,7 +263,11 @@ export class CredentialsTab implements SetupTab {
 						description: this.#host.ctx.sessionId ? "Pins it; no rotation to other rows" : "No running session",
 						disabled: !this.#host.ctx.sessionId,
 					},
-					{ value: "default", label: "Default for new sessions" },
+					{
+						value: "default",
+						label: "Default for new sessions",
+						description: "Running sessions keep theirs.",
+					},
 				];
 			case "newScope":
 				return [
@@ -273,7 +277,11 @@ export class CredentialsTab implements SetupTab {
 						description: this.#host.ctx.sessionId ? undefined : "No running session",
 						disabled: !this.#host.ctx.sessionId,
 					},
-					{ value: "default", label: "Default for new sessions" },
+					{
+						value: "default",
+						label: "Default for new sessions",
+						description: "Running sessions keep theirs.",
+					},
 					{ value: "store", label: "Just store it" },
 				];
 			case "remove":
@@ -395,10 +403,14 @@ export class CredentialsTab implements SetupTab {
 			if (!this.#authStorage.pinSessionCredential(provider, sessionId, id)) {
 				throw new Error(`${name} is missing or disabled.`);
 			}
-			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added ${name}. This session uses it only.`)]);
+			this.#show({ kind: "credentials", provider }, [
+				theme.fg("success", `Added ${name}. This session uses it only.`),
+			]);
 		} else if (value === "default") {
 			this.#authStorage.setDefaultCredential(provider, id);
-			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added ${name}. New sessions start with it.`)]);
+			this.#show({ kind: "credentials", provider }, [
+				theme.fg("success", `Added ${name}. New sessions start with it.`),
+			]);
 		} else if (value === "store") {
 			this.#show({ kind: "credentials", provider }, [theme.fg("success", `Added ${name}.`)]);
 		}
@@ -445,8 +457,11 @@ export class CredentialsTab implements SetupTab {
 		const name = this.#describe(provider, id);
 		const removed = await this.#authStorage.removeCredential(provider, id, { sessionId: this.#host.ctx.sessionId });
 		if (this.#disposed) return;
-		const status = removed ? [theme.fg("success", `Removed ${name}.`)] : [theme.fg("warning", `${name} was already gone.`)];
-		if (removed && row?.pinned) status.push(theme.fg("warning", "This session was pinned to it; the pin is cleared."));
+		const status = removed
+			? [theme.fg("success", `Removed ${name}.`)]
+			: [theme.fg("warning", `${name} was already gone.`)];
+		if (removed && row?.pinned)
+			status.push(theme.fg("warning", "This session was pinned to it; the pin is cleared."));
 		this.#show({ kind: "credentials", provider }, status);
 	}
 
@@ -455,7 +470,9 @@ export class CredentialsTab implements SetupTab {
 		let status: string;
 		try {
 			const disabled = await this.#authStorage.disableCredentialById(id, "disabled by user");
-			status = disabled ? theme.fg("success", `Disabled ${name}.`) : theme.fg("warning", `${name} was already disabled.`);
+			status = disabled
+				? theme.fg("success", `Disabled ${name}.`)
+				: theme.fg("warning", `${name} was already disabled.`);
 		} catch (error) {
 			status = theme.fg("error", error instanceof Error ? error.message : String(error));
 		}

@@ -2224,6 +2224,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			credential: (() => {
+				const provider = state.model?.provider ?? this.session.model?.provider;
+				return provider ? this.host.activeCredential(this.session, provider) : null;
+			})(),
 		};
 	}
 

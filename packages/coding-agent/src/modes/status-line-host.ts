@@ -1,4 +1,5 @@
 import type { StatusLineHost, StatusLineSession } from "@oh-my-pi/pi-tui/status-line/host";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import { settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import { getSessionCompactionBoundaries } from "../session/context-usage-runtime";
@@ -53,6 +54,19 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
 	activeAccount: (session, provider) =>
 		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
+	// Addendum 5 S-3: hidden when the provider has one stored row or none —
+	// nothing to disambiguate, so the segment self-hides rather than showing
+	// a redundant credential everyone already knows.
+	activeCredential: (session, provider) => {
+		const authStorage = session.modelRegistry?.authStorage;
+		const sessionId = session.sessionId;
+		if (!authStorage || !sessionId) return null;
+		const rows = authStorage.listCredentials(provider, sessionId).filter(row => row.disabled === null);
+		if (rows.length <= 1) return null;
+		const active = rows.find(row => row.active);
+		if (!active) return null;
+		return { label: credentialName(active), id: active.id, pinned: active.pinned };
+	},
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
 	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
 	resolveActiveRepo: resolveActiveRepoContextSync,

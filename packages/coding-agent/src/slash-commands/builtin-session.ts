@@ -244,13 +244,28 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handle: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb || (verb === "info" && !rest)) {
-				await runtime.output(
-					[
-						`Session: ${runtime.session.sessionId}`,
-						`Title: ${runtime.session.sessionName}`,
-						`CWD: ${runtime.cwd}`,
-					].join("\n"),
-				);
+				const lines = [
+					`Session: ${runtime.session.sessionId}`,
+					`Title: ${runtime.session.sessionName}`,
+					`CWD: ${runtime.cwd}`,
+				];
+				// Addendum 5 S-3: one line per provider with a stored row, naming
+				// this session's own resolved credential — never another session's.
+				const authStorage = runtime.session.modelRegistry.authStorage;
+				const sessionId = runtime.session.sessionId;
+				const providers = new Set(authStorage.listCredentials().map(row => row.provider));
+				for (const provider of [...providers].sort()) {
+					const rows = authStorage.listCredentials(provider, sessionId).filter(row => row.disabled === null);
+					if (rows.length === 0) continue;
+					const oauthAccounts = authStorage.oauth.accounts(provider, sessionId);
+					const resolvedId =
+						rows.find(row => row.pinned)?.id ?? oauthAccounts.find(account => account.active)?.credentialId;
+					const activeRow = rows.find(row => row.id === resolvedId) ?? rows.find(row => row.active);
+					if (!activeRow) continue;
+					const state = activeRow.pinned ? "pinned" : activeRow.isDefault ? "default" : "sticky";
+					lines.push(`${provider}: ${credentialName(activeRow)} #${activeRow.id} (${state})`);
+				}
+				await runtime.output(lines.join("\n"));
 				return commandConsumed();
 			}
 			if (verb === "delete" && !rest) {

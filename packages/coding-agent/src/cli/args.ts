@@ -42,6 +42,7 @@ export interface Args {
 	planYoloInto?: string;
 	maxTime?: number;
 	apiKey?: string;
+	credential?: string[];
 	systemPrompt?: string;
 	systemPromptTemplate?: string;
 	appendSystemPrompt?: string;

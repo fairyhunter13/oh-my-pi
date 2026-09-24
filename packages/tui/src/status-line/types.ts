@@ -1,7 +1,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState } from "@oh-my-pi/pi-wire";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
-import type { ActiveRepoContext, StatusLineSession } from "./host";
+import type { ActiveRepoContext, StatusCredentialSummary, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -198,6 +198,12 @@ export interface SegmentContext {
 			unavailableReason?: string;
 		};
 	} | null;
+	/**
+	 * This session's active stored credential for the current model's
+	 * provider. Null when the provider has no stored row or exactly one — a
+	 * lone row leaves nothing to disambiguate, so the segment self-hides.
+	 */
+	credential: StatusCredentialSummary | null;
 }
 
 export interface RenderedSegment {

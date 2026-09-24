@@ -911,6 +911,18 @@ const usageSegment: StatusLineSegment = {
 		return { content, visible: true };
 	},
 };
+const credentialSegment: StatusLineSegment = {
+	id: "credential",
+	render(ctx) {
+		const credential = ctx.credential;
+		if (!credential) return { content: "", visible: false };
+		const label = ctx.startupPlaceholder
+			? STARTUP_PLACEHOLDER
+			: `${sanitizeStatusText(credential.label)} #${credential.id}`;
+		const content = credential.pinned ? `${label}${theme.sep.dot}pinned` : label;
+		return { content: theme.fg("muted", content), visible: true };
+	},
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
@@ -941,6 +953,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_hit: cacheHitSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
+	credential: credentialSegment,
 	collab: collabSegment,
 	stream: streamSegment,
 	vim: vimSegment,

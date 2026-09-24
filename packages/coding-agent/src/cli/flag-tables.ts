@@ -163,6 +163,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
+	"--credential": (result, value) => {
+		result.credential = [...(result.credential ?? []), value];
+	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
 	},

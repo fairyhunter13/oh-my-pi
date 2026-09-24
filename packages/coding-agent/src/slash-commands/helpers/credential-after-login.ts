@@ -24,7 +24,11 @@ export const CREDENTIAL_AFTER_LOGIN_SCOPES: ReadonlyArray<{
 	description?: string;
 }> = [
 	{ value: "session", label: "This session" },
-	{ value: "default", label: "Default for new sessions" },
+	{
+		value: "default",
+		label: "Default for new sessions",
+		description: "New sessions for this provider prefer it; running sessions keep theirs.",
+	},
 	{ value: "store", label: "Just store it" },
 ];
 

@@ -8893,6 +8893,10 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// Addendum 5 S-2: a fork keeps running the same conversation under a
+			// new session id, so it keeps whichever credential was pinned, per
+			// provider — never re-ranked onto a sibling session's account.
+			this.#modelRegistry.authStorage.sessions.inherit(previousSessionId, this.sessionManager.getSessionId());
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -10438,6 +10442,7 @@ export class AgentSession implements SettingsScope {
 	}> {
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
 		if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "user") {
@@ -10505,6 +10510,8 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// Addendum 5 S-2: a branch is still this conversation under a new id.
+			this.#modelRegistry.authStorage.sessions.inherit(previousSessionId, this.sessionManager.getSessionId());
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -10643,6 +10650,8 @@ export class AgentSession implements SettingsScope {
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
+			// Addendum 5 S-2: a /btw branch is still this conversation under a new id.
+			this.#modelRegistry.authStorage.sessions.inherit(sessionId, this.sessionManager.getSessionId());
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 

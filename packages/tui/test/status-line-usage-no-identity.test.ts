@@ -18,6 +18,7 @@ function fakeHost(reports: unknown): StatusLineHost {
 		goalStatusInFooter: () => false,
 		// No stored identity is active: the guard under test must decide from report count alone.
 		activeAccount: () => undefined,
+		activeCredential: () => null,
 		canFetchUsageReports: () => true,
 		fetchUsageReports: async () => reports,
 		resolveActiveRepo: () => null,

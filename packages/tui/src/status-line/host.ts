@@ -11,6 +11,14 @@ export interface StatusAccountIdentity {
 	orgId?: string;
 }
 
+/** This session's active stored credential for one provider (Addendum 5: per-session credential). */
+export interface StatusCredentialSummary {
+	label: string;
+	id: number;
+	/** This session holds an explicit pin on this row, not just the sticky/default choice. */
+	pinned: boolean;
+}
+
 /** Nested repository selected as the active workspace context. */
 export interface ActiveRepoContext {
 	cwd: string;
@@ -85,6 +93,11 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	getSessionSettingsRevision(session: TSession): number;
 	goalStatusInFooter(session: TSession): boolean;
 	activeAccount(session: TSession, provider: string): StatusAccountIdentity | undefined;
+	/**
+	 * This session's active stored credential for `provider`, or null when the
+	 * provider has no stored row or exactly one (nothing to disambiguate).
+	 */
+	activeCredential(session: TSession, provider: string): StatusCredentialSummary | null;
 	canFetchUsageReports(session: TSession): boolean;
 	fetchUsageReports(session: TSession, signal: AbortSignal): Promise<unknown>;
 	resolveActiveRepo(cwd: string): ActiveRepoContext | null;

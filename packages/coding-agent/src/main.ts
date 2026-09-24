@@ -26,6 +26,8 @@ import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/arg
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { resolveSessionCredentials, type SessionCredentialTarget } from "./cli/session-credential";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
@@ -2162,6 +2164,26 @@ export async function runRootCommand(
 			}
 		}
 
+		// Handle CLI --credential (Addendum 5 S-1): pin a stored row as this
+		// session's own active credential before the first turn, independent of
+		// every other running session and of the provider default. Resolved
+		// here (fast-fail on a malformed/unknown/disabled value), applied once
+		// the real session id exists below — the "new session" case leaves the
+		// preliminary `sessionManager` above undefined until the SDK mints one.
+		let sessionCredentialTargets: SessionCredentialTarget[] | undefined;
+		if (parsedArgs.credential?.length) {
+			if (mode === "acp") {
+				process.stderr.write(`${chalk.red("--credential is not supported in ACP mode.")}\n`);
+				process.exit(1);
+			}
+			const resolved = resolveSessionCredentials(authStorage, parsedArgs.credential, sessionOptions.model?.provider);
+			if (typeof resolved === "string") {
+				process.stderr.write(`${chalk.yellow(resolved)}\n`);
+				process.exit(2);
+			}
+			sessionCredentialTargets = resolved;
+		}
+
 		const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
@@ -2297,6 +2319,22 @@ export async function runRootCommand(
 			} catch (error) {
 				await session.dispose();
 				throw error;
+			}
+
+			// Addendum 5 S-1: apply --credential's validated targets now that the
+			// real session id exists (a brand-new session mints it inside
+			// createSession, so no earlier id was available to pin).
+			if (sessionCredentialTargets) {
+				const pinSessionId = session.sessionId;
+				for (const target of sessionCredentialTargets) {
+					if (!authStorage.pinSessionCredential(target.provider, pinSessionId, target.row.id)) {
+						process.stderr.write(
+							`${chalk.yellow(`${credentialName(target.row)} is no longer available to pin.`)}\n`,
+						);
+						await session.dispose();
+						process.exit(2);
+					}
+				}
 			}
 
 			// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
