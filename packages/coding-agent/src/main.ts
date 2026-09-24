@@ -2176,7 +2176,11 @@ export async function runRootCommand(
 				process.stderr.write(`${chalk.red("--credential is not supported in ACP mode.")}\n`);
 				process.exit(1);
 			}
-			const resolved = resolveSessionCredentials(authStorage, parsedArgs.credential, sessionOptions.model?.provider);
+			const resolved = resolveSessionCredentials(
+				authStorage,
+				parsedArgs.credential,
+				parsedArgs.apiKey ? sessionOptions.model?.provider : undefined,
+			);
 			if (typeof resolved === "string") {
 				process.stderr.write(`${chalk.yellow(resolved)}\n`);
 				process.exit(2);
