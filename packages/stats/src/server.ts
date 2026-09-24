@@ -20,7 +20,7 @@ import {
 	syncAllSessions,
 } from "./aggregator";
 import { readCredentialLabels } from "./credential-labels";
-import { listStatsCredentials } from "./db";
+import { initDb, listStatsCredentials } from "./db";
 import { decodeEmbeddedClientArchive } from "./embedded-client";
 import embeddedClientArchiveTxt from "./embedded-client.generated.txt";
 import { getGainDashboardStats } from "./gain-aggregator";
@@ -223,6 +223,10 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/credentials") {
+		// listStatsCredentials reads `messages` from the already-open db handle
+		// and answers [] before the first sync opens it (F4) — a dashboard
+		// started with no sync yet (a bare `/trace` open) must still list rows.
+		await initDb();
 		const labels = readCredentialLabels();
 		const credentials = listStatsCredentials().map(row => ({
 			...row,

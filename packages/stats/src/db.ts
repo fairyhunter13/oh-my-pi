@@ -1820,6 +1820,7 @@ export function markSessionBackfillsComplete(): void {
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
 			COST_UNPRICED_BACKFILL_KEY,
+			MESSAGES_CREDENTIAL_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}

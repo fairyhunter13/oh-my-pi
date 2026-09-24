@@ -5,7 +5,11 @@ import { getOAuthProvider } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import { OAUTH_LOGIN_REPLACED_CAUSE } from "./credential-catalog";
-import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
+import {
+	matchesReplacementCredential,
+	resolveCredentialIdentityKey,
+	resolveRowCredentialIdentityKey,
+} from "./sqlite-credential-store";
 import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
@@ -132,6 +136,7 @@ export class OAuthAccounts implements OAuthApi {
 			const catalog = this.#deps.store.credentialCatalog;
 			let targetProvider: string | undefined;
 			let targetCredential: AuthCredential | undefined;
+			let targetIdentityKey: string | null = null;
 			if (catalog) {
 				const row = catalog.get(id);
 				if (row) {
@@ -140,18 +145,24 @@ export class OAuthAccounts implements OAuthApi {
 						row.credential_type === "oauth"
 							? ({ type: "oauth", ...JSON.parse(row.data) } as OAuthCredential)
 							: undefined;
+					if (targetCredential) targetIdentityKey = resolveRowCredentialIdentityKey(storageProvider, row);
 				}
 			} else {
 				const entry = this.#deps.store.listAuthCredentials(storageProvider).find(candidate => candidate.id === id);
 				targetProvider = entry?.provider;
 				targetCredential = entry?.credential;
+				if (targetCredential?.type === "oauth") {
+					targetIdentityKey = resolveCredentialIdentityKey(storageProvider, targetCredential);
+				}
 			}
 			if (targetProvider !== storageProvider || targetCredential?.type !== "oauth") {
 				throw new AIError.ConfigurationError(`${storageProvider} has no subscription #${id} to log in again as.`);
 			}
-			const targetKey = resolveCredentialIdentityKey(storageProvider, targetCredential);
-			const newKey = resolveCredentialIdentityKey(storageProvider, newCredential);
-			if (targetKey === null || newKey === null || targetKey !== newKey) {
+			// matchesReplacementCredential accepts a re-keyed token for the same
+			// subscription (an org recovered, an email lost), not only an exact
+			// identity-key match — the same rule that already governs which row an
+			// ordinary login updates (see sqlite-credential-store.ts).
+			if (!matchesReplacementCredential(storageProvider, targetCredential, targetIdentityKey, newCredential)) {
 				throw new AIError.ConfigurationError(
 					`Signed in as ${who(newCredential)}, not ${who(targetCredential)}. Nothing was saved.`,
 				);

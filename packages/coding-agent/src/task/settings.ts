@@ -355,6 +355,19 @@ export const cfgTaskMaxEffort = register({
 	},
 });
 
+export const cfgTaskProjectClaudeAgents = register({
+	id: "task.projectClaudeAgents",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Load Project .claude/agents",
+		description:
+			"Load a repo's own .claude/agents as task agents, in the Claude dialect. Independent of disabledProviders: [claude], which keeps ~/.claude's CLAUDE.md, commands and MCP config out of omp but leaves a repo's own agents alone.",
+	},
+});
+
 export const cfgTaskDisabledAgents = register({
 	id: "task.disabledAgents",
 	protocolDefault: ["rpc", "acp"],

@@ -746,9 +746,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const credentialId =
 						credentialIdRaw === "none"
 							? null
-							: credentialIdRaw === null
-								? Number.NaN
-								: Number.parseInt(credentialIdRaw, 10);
+							: credentialIdRaw !== null && /^\d+$/.test(credentialIdRaw)
+								? Number.parseInt(credentialIdRaw, 10)
+								: Number.NaN;
 					if (!provider || Number.isNaN(credentialId)) {
 						return json(400, { error: "provider and credentialId are required" });
 					}

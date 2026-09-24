@@ -17,6 +17,8 @@ export interface TopBarProps {
 	onSyncStart?: () => void;
 	onSyncComplete?: (result: { success: boolean }) => void;
 	onMenuToggle?: () => void;
+	/** Bumped after a sync completes; re-fetches the credential list. */
+	refreshTrigger?: number;
 	className?: string;
 }
 
@@ -30,6 +32,7 @@ export function TopBar({
 	onSyncStart,
 	onSyncComplete,
 	onMenuToggle,
+	refreshTrigger,
 	className = "",
 }: TopBarProps) {
 	const currentRoute = routes.find(r => r.id === activeSection);
@@ -67,7 +70,7 @@ export function TopBar({
 					</span>
 				</div>
 
-				<CredentialControl value={credential} onChange={onCredentialChange} />
+				<CredentialControl value={credential} onChange={onCredentialChange} refreshTrigger={refreshTrigger} />
 
 				<RangeControl value={range} onChange={onRangeChange} />
 

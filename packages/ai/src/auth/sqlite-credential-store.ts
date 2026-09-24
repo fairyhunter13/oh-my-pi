@@ -68,7 +68,7 @@ const CLIENT_USAGE_BUCKET_MS = 5 * 60_000;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Row shape for auth_credentials table queries */
-type AuthRow = {
+export type AuthRow = {
 	id: number;
 	provider: string;
 	credential_type: string;
@@ -205,14 +205,16 @@ export function resolveCredentialIdentityKey(provider: string, credential: AuthC
 	return resolveProviderCredentialIdentityKey(provider, extractOAuthCredentialIdentifiers(credential));
 }
 
-function resolveRowCredentialIdentityKey(provider: string, row: AuthRow): string | null {
+/** Stored identity key of one row, falling back to the computed key for a legacy row never re-keyed. */
+export function resolveRowCredentialIdentityKey(provider: string, row: AuthRow): string | null {
 	const identityKey = normalizeStoredIdentityKey(row.identity_key);
 	if (identityKey) return identityKey;
 	const credential = deserializeCredential(row);
 	return credential?.type === "oauth" ? resolveCredentialIdentityKey(provider, credential) : null;
 }
 
-function matchesReplacementCredential(
+/** Whether `incoming` is the same subscription as `existing` (a re-login lands on the same row, an upgrade re-keys it). */
+export function matchesReplacementCredential(
 	provider: string,
 	existing: AuthCredential | null,
 	existingIdentityKey: string | null,

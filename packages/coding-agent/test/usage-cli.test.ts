@@ -3,13 +3,15 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { AuthStorage, SqliteAuthCredentialStore, type UsageReport } from "@oh-my-pi/pi-ai";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	formatUsageBreakdown,
 	formatUsageHistory,
 	resolveUsageCredential,
+	runUsageCommand,
 	type UsageAccountIdentity,
 	type UsagePolicyDiagnosticsOptions,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
@@ -888,5 +890,61 @@ describe("resolveUsageCredential", () => {
 
 		const bad = resolveUsageCredential(storage, `anthropic/${id + 999}`);
 		expect(bad).toBe(`No stored credential matches "anthropic/${id + 999}".`);
+	});
+});
+
+describe("runUsageCommand exit code (F11)", () => {
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
+	it("exits 2 and lists candidates when two credentials are stored and --credential is omitted", async () => {
+		using tempDir = TempDir.createSync("@omp-usage-exit2-");
+		setAgentDir(tempDir.path());
+		resetSettingsForTest();
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir.path(), "agent.db"));
+		const seedStorage = new AuthStorage(store);
+		await seedStorage.credentials.upsert("anthropic", {
+			type: "oauth",
+			access: "access-a",
+			refresh: "refresh-a",
+			expires: Date.now() + 60_000,
+			email: "a@example.test",
+		});
+		await seedStorage.credentials.upsert("anthropic", {
+			type: "oauth",
+			access: "access-b",
+			refresh: "refresh-b",
+			expires: Date.now() + 60_000,
+			email: "b@example.test",
+		});
+		seedStorage.close();
+
+		const originalExitCode = process.exitCode;
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write.bind(process.stderr);
+		// biome-ignore lint/suspicious/noExplicitAny: capturing the real stderr.write's overloaded signature
+		process.stderr.write = ((chunk: string) => {
+			writes.push(stripVTControlCharacters(String(chunk)));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await runUsageCommand({});
+			expect(process.exitCode).toBe(2);
+			const text = writes.join("");
+			expect(text).toContain("Pick a credential with --credential <provider>/<id>:");
+			expect(text).toContain("anthropic/");
+		} finally {
+			process.stderr.write = originalWrite;
+			// Bun does not clear a numeric process.exitCode back to "unset" on
+			// assigning `undefined` — restore an explicit 0 (or the prior
+			// number) so this test cannot poison the suite's own exit code.
+			process.exitCode = originalExitCode ?? 0;
+			if (originalAgentDir) setAgentDir(originalAgentDir);
+			else {
+				setAgentDir(fallbackAgentDir);
+				delete process.env.PI_CODING_AGENT_DIR;
+			}
+			resetSettingsForTest();
+		}
 	});
 });

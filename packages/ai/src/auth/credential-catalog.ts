@@ -44,6 +44,8 @@ export interface CredentialCatalogRow {
 	disabled_cause: string | null;
 	label: string | null;
 	is_default: number;
+	/** Stored identity key, `NULL` for a legacy row never re-keyed. */
+	identity_key: string | null;
 }
 
 /** Store capability that {@link AuthStorage} uses for labels, defaults and re-enabling. */
@@ -113,7 +115,7 @@ function normalizeLabel(label: string | null | undefined): string | null {
 	return trimmed ? trimmed : null;
 }
 
-const CATALOG_COLUMNS = "id, provider, credential_type, data, disabled_cause, label, is_default";
+const CATALOG_COLUMNS = "id, provider, credential_type, data, disabled_cause, label, is_default, identity_key";
 const NOT_TOMBSTONE = `disabled_cause IS NOT '${DELETED_BY_USER_CAUSE}'`;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
@@ -260,7 +262,11 @@ export function summarizeCredentialRow(
 		label: row.label,
 		identity:
 			kind === "oauth"
-				? (text(data.email) ?? text(data.accountId) ?? text(data.orgName) ?? text(data.orgId) ?? text(data.projectId))
+				? (text(data.email) ??
+					text(data.accountId) ??
+					text(data.orgName) ??
+					text(data.orgId) ??
+					text(data.projectId))
 				: null,
 		org: (() => {
 			if (kind !== "oauth") return null;
@@ -294,7 +300,10 @@ function baseCredentialLabel(row: CredentialSummary, rows: readonly CredentialSu
 	const identity = row.identity ?? row.hint ?? row.kind;
 	const sameIdentityElsewhere = rows.some(
 		other =>
-			other.id !== row.id && other.provider === row.provider && other.kind === "oauth" && other.identity === identity,
+			other.id !== row.id &&
+			other.provider === row.provider &&
+			other.kind === "oauth" &&
+			other.identity === identity,
 	);
 	return sameIdentityElsewhere && row.org ? `${identity} (${row.org})` : identity;
 }
@@ -313,7 +322,8 @@ export function suggestCredentialLabel(rows: CredentialSummary[], row: Credentia
 	const taken = new Set(
 		rows
 			.filter(
-				(other, index) => other.id !== row.id && other.provider === row.provider && (rowPosition === -1 || index < rowPosition),
+				(other, index) =>
+					other.id !== row.id && other.provider === row.provider && (rowPosition === -1 || index < rowPosition),
 			)
 			.map(other => (other.label ?? baseCredentialLabel(other, rows)).toLowerCase()),
 	);

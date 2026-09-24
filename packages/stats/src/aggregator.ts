@@ -54,6 +54,7 @@ import type {
 	StatsCredential,
 	ToolDashboardStats,
 } from "./types";
+import { usageRowMatchesCredential } from "./credential-labels";
 import { computeUsageWindowStats, fetchUsageData } from "./usage-windows";
 
 const STATS_SYNC_LOCK_RETRY_MS = 25;
@@ -606,8 +607,14 @@ export async function getProviderDashboardStats(
 	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
 	const providers = getStatsByProvider(credential, cutoff ?? undefined);
 	const usage = await fetchUsageData(cutoff ?? 0, credential);
+	// F5: usage.rows spans every account of every provider — narrow to the
+	// picked credential's own account before deriving fractions and window
+	// insights, so a card never divides one credential's tokens by another
+	// account's consumed fraction, and `accounts` is exactly 1.
+	const matchesCredential = usageRowMatchesCredential(credential);
+	const credentialRows = usage.rows.filter(matchesCredential);
 	const tokensByProvider = usage.fleetTokensByProvider ?? new Map(providers.map(p => [p.provider, p.totalTokens]));
-	const { usageSeries, windowInsights } = computeUsageWindowStats(usage.rows, tokensByProvider);
+	const { usageSeries, windowInsights } = computeUsageWindowStats(credentialRows, tokensByProvider);
 	return {
 		providers,
 		hourly: getProviderHourlyBurn(credential, cutoff ?? undefined),

@@ -1,4 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+	matchesReplacementCredential,
+	resolveCredentialIdentityKey,
+	resolveRowCredentialIdentityKey,
+	type AuthRow,
+} from "@oh-my-pi/pi-ai/auth/sqlite-credential-store";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -115,5 +121,36 @@ describe("AuthStorage OAuth re-login identity check", () => {
 		} finally {
 			authStorage.close();
 		}
+	});
+});
+
+describe("matchesReplacementCredential — F1: an org-scoped re-login recovers an org-less row", () => {
+	test("same email plus a newly-seen orgId is accepted as the same subscription", () => {
+		const provider = "anthropic";
+		const existing = {
+			type: "oauth" as const,
+			access: "a",
+			refresh: "r",
+			expires: Date.now() + 60_000,
+			email: "x@example.com",
+		};
+		const orgLessRow: AuthRow = {
+			id: 1,
+			provider,
+			credential_type: "oauth",
+			data: JSON.stringify(existing),
+			disabled_cause: null,
+			identity_key: null,
+		};
+		const existingKey = resolveRowCredentialIdentityKey(provider, orgLessRow);
+		expect(existingKey).toBe(resolveCredentialIdentityKey(provider, existing));
+
+		// Before F1, oauth.ts compared identity keys by strict string equality:
+		// `email:x` !== `email:x|org:o`, so this re-login was wrongly refused.
+		const sameEmailWithOrg = { ...existing, orgId: "o", orgName: "Org" };
+		expect(matchesReplacementCredential(provider, existing, existingKey, sameEmailWithOrg)).toBe(true);
+
+		const differentEmail = { ...existing, email: "y@example.com" };
+		expect(matchesReplacementCredential(provider, existing, existingKey, differentEmail)).toBe(false);
 	});
 });

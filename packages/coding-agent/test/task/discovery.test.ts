@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { disableProvider, enableProvider } from "@oh-my-pi/pi-coding-agent/capability";
+import { disableProvider, enableProvider, initializeWithSettings } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearAgentPluginRootCache } from "@oh-my-pi/pi-coding-agent/discovery/agent-plugin-format";
 import {
 	clearOmpExtensionCliRoots,
@@ -176,16 +177,39 @@ describe("discoverAgents", () => {
 		expect(matches[0].filePath).toBe(path.join(projectDir, ".omp", "agents", "cc-test-agent.md"));
 	});
 
-	test("skips a project's .claude/agents when the claude provider is disabled", async () => {
+	test("a repo's .claude/agents loads even when the claude provider is disabled", async () => {
 		await fs.mkdir(path.join(projectDir, ".claude", "agents"), { recursive: true });
 		await fs.writeFile(path.join(projectDir, ".claude", "agents", "project-cc-test-agent.md"), CLAUDE_AGENT_MD);
 		disableProvider("claude");
 		try {
 			const { agents } = await discoverAgents(projectDir, tempHome);
-			expect(agents.map(agent => agent.name)).not.toContain("cc-test-agent");
+			expect(agents.map(agent => agent.name)).toContain("cc-test-agent");
 		} finally {
 			enableProvider("claude");
 		}
+	});
+
+	test("skips a repo's .claude/agents when task.projectClaudeAgents is off", async () => {
+		await fs.mkdir(path.join(projectDir, ".claude", "agents"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".claude", "agents", "project-cc-test-agent.md"), CLAUDE_AGENT_MD);
+		initializeWithSettings(Settings.isolated({ "task.projectClaudeAgents": false }));
+		try {
+			const { agents } = await discoverAgents(projectDir, tempHome);
+			expect(agents.map(agent => agent.name)).not.toContain("cc-test-agent");
+		} finally {
+			initializeWithSettings(Settings.isolated({}));
+		}
+	});
+
+	test("F2: a cwd under a temp HOME with only ~/.claude/agents loads none", async () => {
+		// No project-level .claude/agents anywhere between projectDir and
+		// tempHome — only tempHome's own (Claude Code's user dir) exists.
+		await fs.mkdir(path.join(tempHome, ".claude", "agents"), { recursive: true });
+		await fs.writeFile(path.join(tempHome, ".claude", "agents", "user-cc-agent.md"), CLAUDE_AGENT_MD);
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+
+		expect(agents.map(agent => agent.name)).not.toContain("cc-test-agent");
 	});
 
 	test("loads agents from OMP npm plugins under <home>/.omp/plugins/node_modules", async () => {

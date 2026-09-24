@@ -137,12 +137,12 @@ Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter thr
 
 ## Filesystem and plugin discovery
 
-`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from OMP-native roots, a project's `.claude/agents`, OMP extension packages, and Claude marketplace plugin roots before appending bundled definitions. A project's `.claude/agents` loads in the Claude dialect: its `model:` aliases are dropped and its tool names are normalized. User `~/.claude/agents`, `.codex/agents` and `.gemini/agents` stay skipped — their frontmatter schema is not the OMP task-agent contract.
+`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from OMP-native roots, a project's `.claude/agents`, OMP extension packages, and Claude marketplace plugin roots before appending bundled definitions. A project's `.claude/agents` loads in the Claude dialect: its `model:` aliases are dropped and its tool names are normalized. `home`'s own `~/.claude/agents` (Claude Code's user dir, reachable by the walk-up in every repo under `home` with no nearer `.claude/agents`) is excluded — it is not a repo's own agents. User `.codex/agents` and `.gemini/agents` stay skipped — their frontmatter schema is not the OMP task-agent contract.
 
 ### Discovery inputs and precedence
 
 1. Nearest project `.omp/agents` dir from `findAllNearestProjectConfigDirs("agents", cwd)` (first `.omp` hit only)
-2. Nearest project `.claude/agents` dir from the same call (first `.claude` hit only), with `model:` dropped — only when `isProviderEnabled("claude")`
+2. Nearest project `.claude/agents` dir from the same call (first `.claude` hit only, excluding `home`'s own `.claude/agents`), with `model:` dropped — only when `task.projectClaudeAgents` is on (default). Independent of `isProviderEnabled("claude")`, which gates `~/.claude`'s CLAUDE.md, commands and MCP config, not a repo's own agents.
 3. User `.omp/agents` dir from `getConfigDirs("agents", { project: false })` (first `.omp` hit only)
 4. `<extension-root>/agents` for every enabled OMP extension package returned by `listOmpExtensionRoots(...)`, in this order:
    - CLI `--extension` roots

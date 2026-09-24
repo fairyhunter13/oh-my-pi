@@ -22,6 +22,7 @@ import {
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
+import { buildUsageCredential, usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
@@ -1162,16 +1163,14 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				return;
 			}
 			const stored = authStorage.credentials.list(target.provider).find(entry => entry.id === target.row.id);
-			const identity = stored?.credential.type === "oauth" ? stored.credential : undefined;
+			// F6: match by the full usageCacheIdentity, not by email/accountId
+			// separately — two org rows sharing one email must not both match.
+			const accountKey = stored ? usageCacheIdentity(buildUsageCredential(stored.credential)) : undefined;
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
 			const allEntries = authStorage.usage.history({ sinceMs, provider: target.provider });
-			const entries = allEntries.filter(
-				entry =>
-					(identity?.email !== undefined && entry.email === identity.email) ||
-					(identity?.accountId !== undefined && entry.accountId === identity.accountId),
-			);
+			const entries = allEntries.filter(entry => accountKey !== undefined && entry.accountKey === accountKey);
 			const redaction = cmd.redact ? buildRedactionMap(collectHistoryIdentityStrings(entries)) : undefined;
 			if (cmd.json) {
 				const masked = redaction

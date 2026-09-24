@@ -16,6 +16,8 @@ export interface AppLayoutProps {
 	updatedAt: number | null;
 	onSyncStart?: () => void;
 	onSyncComplete?: (result: { success: boolean }) => void;
+	/** Bumped after a sync completes; re-fetches the credential list. */
+	refreshTrigger?: number;
 	children: React.ReactNode;
 }
 
@@ -29,6 +31,7 @@ export function AppLayout({
 	updatedAt,
 	onSyncStart,
 	onSyncComplete,
+	refreshTrigger,
 	children,
 }: AppLayoutProps) {
 	const [menuOpen, setMenuOpen] = useState(false);
@@ -88,6 +91,7 @@ export function AppLayout({
 					onSyncStart={onSyncStart}
 					onSyncComplete={onSyncComplete}
 					onMenuToggle={() => setMenuOpen(true)}
+					refreshTrigger={refreshTrigger}
 				/>
 
 				<main className="stats-content-area">

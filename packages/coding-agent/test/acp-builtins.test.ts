@@ -444,6 +444,86 @@ describe("ACP builtin slash commands", () => {
 		}
 	});
 
+	it("with two stored credentials, /usage lists both and /usage show renders only the named one (F11)", async () => {
+		const { output, runtime } = createRuntime();
+		const reportA: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 1, unit: "usd" },
+				},
+			],
+			metadata: { email: "a@example.com" },
+		};
+		const reportB: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 2, unit: "usd" },
+				},
+			],
+			metadata: { email: "b@example.com" },
+		};
+		const rowA: CredentialSummary = {
+			id: 1,
+			provider: "anthropic",
+			kind: "oauth",
+			label: "Work",
+			identity: "a@example.com",
+			org: null,
+			hint: null,
+			disabled: null,
+			isDefault: false,
+			active: true,
+			pinned: false,
+		};
+		const rowB: CredentialSummary = { ...rowA, id: 2, label: "Personal", identity: "b@example.com", active: false };
+		runtime.session.fetchUsageReports = async () => [reportA, reportB];
+		// `runtime.session`'s static type is `AgentSession & FakeAcpBuiltinSession`,
+		// which resolves `authStorage` to the real `AuthStorage` shape. Cast back
+		// to the fake session's own stub shape, matching `stubUsageCredential`.
+		const fakeSession = runtime.session as unknown as FakeAcpBuiltinSession;
+		const authStorage = fakeSession.modelRegistry.authStorage;
+		authStorage.listCredentials = () => [rowA, rowB];
+		authStorage.credentials.list = () => [
+			{ id: 1, provider: "anthropic", credential: { type: "api_key", key: "a" } },
+			{ id: 2, provider: "anthropic", credential: { type: "api_key", key: "b" } },
+		];
+		authStorage.usage.providerFor = () => ({});
+		authStorage.usage.report = async (_provider, credential) =>
+			credential && typeof credential === "object" && "key" in credential && credential.key === "a"
+				? reportA
+				: reportB;
+
+		const listResult = await executeAcpBuiltinSlashCommand("/usage", runtime);
+		expect(listResult).toEqual({ consumed: true });
+		expect(output[0]).toContain("- Work [anthropic/1] (active)");
+		expect(output[0]).toContain("- Personal [anthropic/2]");
+		expect(output[0]).not.toContain("Personal [anthropic/2] (active)");
+
+		const showA = await executeAcpBuiltinSlashCommand("/usage show anthropic/1", runtime);
+		expect(showA).toEqual({ consumed: true });
+		expect(output[1]).toContain("a@example.com");
+		expect(output[1]).not.toContain("b@example.com");
+
+		const showB = await executeAcpBuiltinSlashCommand("/usage show anthropic/2", runtime);
+		expect(showB).toEqual({ consumed: true });
+		expect(output[2]).toContain("b@example.com");
+		expect(output[2]).not.toContain("a@example.com");
+
+		const unknown = await executeAcpBuiltinSlashCommand("/usage show anthropic/999", runtime);
+		expect(unknown).toEqual({ consumed: true });
+		expect(output[3]).toBe('No stored credential matches "anthropic/999". List choices with `/usage`.');
+	});
+
 	it("routes saved reset redemption through /usage reset", async () => {
 		const { runtime } = createRuntime();
 		let redeemedTarget: ResetCreditTarget | undefined;

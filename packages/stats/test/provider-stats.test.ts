@@ -37,6 +37,17 @@ function snapshot(overrides: Partial<UsageSnapshotRow> & { recordedAt: number })
 	};
 }
 
+interface AuthCredentialRow {
+	id: number;
+	provider: string;
+	accountId: string;
+}
+
+/** Minimal `auth_credentials` row whose computed `usageCacheIdentity` matches `snapshot()`'s default accountKey shape (`oauth|account:<id>`). */
+function authCredentialRow({ id, provider, accountId }: AuthCredentialRow) {
+	return { id, provider, credentialType: "oauth", data: JSON.stringify({ accountId }) };
+}
+
 function message(overrides: Partial<MessageStats> & { entryId: string }): MessageStats {
 	return {
 		sessionFile: "/tmp/session.jsonl",
@@ -62,7 +73,7 @@ function message(overrides: Partial<MessageStats> & { entryId: string }): Messag
 	};
 }
 
-function createAgentDb(rows: UsageSnapshotRow[]): void {
+function createAgentDb(rows: UsageSnapshotRow[], credentials: AuthCredentialRow[] = []): void {
 	const dbPath = getAgentDbPath();
 	fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 	const db = new Database(dbPath);
@@ -100,6 +111,24 @@ function createAgentDb(rows: UsageSnapshotRow[]): void {
 				row.usedFraction,
 				row.status,
 			);
+		}
+		db.run(`
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled_cause TEXT,
+				label TEXT,
+				is_default INTEGER NOT NULL DEFAULT 0
+			)
+		`);
+		const insertCred = db.prepare(
+			`INSERT INTO auth_credentials (id, provider, credential_type, data, disabled_cause, label, is_default) VALUES (?, ?, ?, ?, NULL, NULL, 0)`,
+		);
+		for (const credential of credentials) {
+			const row = authCredentialRow(credential);
+			insertCred.run(row.id, row.provider, row.credentialType, row.data);
 		}
 	} finally {
 		db.close();
@@ -374,5 +403,48 @@ describe("getProviderDashboardStats", () => {
 		const statsB = await getProviderDashboardStats(PROV_B_CREDENTIAL, "all");
 		expect(statsB.providers.map(p => p.provider)).toEqual(["prov-b"]);
 		expect(statsB.series.some(p => p.provider === "prov-b" && p.totalTokens === 150)).toBe(true);
+	});
+
+	it("F5: two accounts of one provider never merge — windowInsights covers only the picked credential", async () => {
+		await initDb();
+		insertMessageStats([message({ entryId: "two-a1", provider: "prov-a", timestamp: T0 })]);
+		createAgentDb(
+			[
+				// Account 1 burns 0.1 → 0.9 (0.8 of a window).
+				snapshot({ recordedAt: T0, accountKey: "oauth|account:acct-1", accountId: "acct-1", usedFraction: 0.1 }),
+				snapshot({
+					recordedAt: T0 + MINUTE,
+					accountKey: "oauth|account:acct-1",
+					accountId: "acct-1",
+					usedFraction: 0.9,
+				}),
+				// Account 2 burns 0.2 → 0.3 (0.1 of a window) — must not leak into account 1's picture.
+				snapshot({ recordedAt: T0, accountKey: "oauth|account:acct-2", accountId: "acct-2", usedFraction: 0.2 }),
+				snapshot({
+					recordedAt: T0 + MINUTE,
+					accountKey: "oauth|account:acct-2",
+					accountId: "acct-2",
+					usedFraction: 0.3,
+				}),
+			],
+			[
+				{ id: 11, provider: "prov-a", accountId: "acct-1" },
+				{ id: 12, provider: "prov-a", accountId: "acct-2" },
+			],
+		);
+
+		const statsAcct1 = await getProviderDashboardStats({ provider: "prov-a", credentialId: 11 }, "all");
+		expect(statsAcct1.windowInsights).toHaveLength(1);
+		expect(statsAcct1.windowInsights[0].accounts).toBe(1);
+		expect(statsAcct1.windowInsights[0].fractionConsumed).toBeCloseTo(0.8, 10);
+		expect(statsAcct1.usageSeries).toHaveLength(1);
+		expect(statsAcct1.usageSeries[0].accountKey).toBe("oauth|account:acct-1");
+
+		const statsAcct2 = await getProviderDashboardStats({ provider: "prov-a", credentialId: 12 }, "all");
+		expect(statsAcct2.windowInsights).toHaveLength(1);
+		expect(statsAcct2.windowInsights[0].accounts).toBe(1);
+		expect(statsAcct2.windowInsights[0].fractionConsumed).toBeCloseTo(0.1, 10);
+		expect(statsAcct2.usageSeries).toHaveLength(1);
+		expect(statsAcct2.usageSeries[0].accountKey).toBe("oauth|account:acct-2");
 	});
 });

@@ -415,7 +415,7 @@ export interface InteractiveModeContext {
 	handleSessionCommand(): Promise<void>;
 	handleAdvisorStatusCommand(): Promise<void>;
 	handleJobsCommand(): Promise<void>;
-	handleUsageCommand(): Promise<void>;
+	handleUsageCommand(target?: string): Promise<void>;
 	handleChangelogCommand(args?: string): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;

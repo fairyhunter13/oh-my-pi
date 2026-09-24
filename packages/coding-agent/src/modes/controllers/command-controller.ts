@@ -62,6 +62,7 @@ import {
 	formatCodexUsageReportLabel,
 	limitMatchesActiveAccount,
 } from "../../slash-commands/helpers/active-oauth-account";
+import { resolveUsageRowByTarget, usageTargetNotFoundText } from "../../slash-commands/helpers/usage-report";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { outputMeta } from "../../tools/output-meta";
@@ -632,7 +633,7 @@ export class CommandController {
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
 	}
 
-	async handleUsageCommand(): Promise<void> {
+	async handleUsageCommand(target?: string): Promise<void> {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
 		const sessionId = this.ctx.session.sessionId;
 		const rows: CredentialSummary[] = authStorage
@@ -642,9 +643,22 @@ export class CommandController {
 			this.ctx.showWarning("No stored credential has a usage endpoint. Use /login to add one.");
 			return;
 		}
-		const target = await this.ctx.pickCredential({ verb: "Usage", rows });
-		if (!target || target.kind !== "row") return;
-		const { provider, row } = target;
+		let row: CredentialSummary;
+		if (target !== undefined) {
+			// F7: `/usage show <provider>/<id|active>` resolves the target the
+			// same way the ACP text does, and skips the picker entirely.
+			const resolved = resolveUsageRowByTarget(rows, target);
+			if (!resolved) {
+				this.ctx.showWarning(usageTargetNotFoundText(target));
+				return;
+			}
+			row = resolved;
+		} else {
+			const picked = await this.ctx.pickCredential({ verb: "Usage", rows });
+			if (!picked || picked.kind !== "row") return;
+			row = picked.row;
+		}
+		const provider = row.provider;
 		const stored = authStorage.credentials.list(provider).find(entry => entry.id === row.id);
 		if (!stored) {
 			this.ctx.showWarning(`No usage data for ${credentialName(row)} (#${row.id}).`);

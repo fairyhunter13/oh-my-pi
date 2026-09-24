@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getDailyActivity, getOverallStats, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
+import { closeDb, getDailyActivity, getOverallStats, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { formatStatsCredential, parseStatsCredential } from "@oh-my-pi/omp-stats/shared-types";
 import type { MessageStats, StatsCredential } from "@oh-my-pi/omp-stats/types";
 import { handleApi } from "../src/server";
@@ -90,5 +90,16 @@ describe("per-credential filtering", () => {
 			new Request("http://stats.test/api/stats/overview?range=24h&credential=anthropic:1"),
 		);
 		expect(present.status).toBe(200);
+	});
+
+	it("F4: /api/credentials lists a row even when the db has not been opened yet", async () => {
+		await initDb();
+		insertMessageStats([makeMessage("f4-a", 1, 10)]);
+		closeDb();
+
+		const response = await handleApi(new Request("http://stats.test/api/credentials"));
+		expect(response.status).toBe(200);
+		const rows = (await response.json()) as Array<{ id: string }>;
+		expect(rows.map(row => row.id)).toContain(formatStatsCredential(CRED_1));
 	});
 });

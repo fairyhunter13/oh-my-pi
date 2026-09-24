@@ -6878,8 +6878,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleJobsCommand();
 	}
 
-	handleUsageCommand(): Promise<void> {
-		return this.#commandController.handleUsageCommand();
+	handleUsageCommand(target?: string): Promise<void> {
+		return this.#commandController.handleUsageCommand(target);
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {

@@ -8,7 +8,7 @@ import {
 	formatActivityErrorDetail,
 	UsageDashboardComponent,
 } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 function day(day: string, cost: number, requests = 1): DailyActivityPoint {
@@ -212,6 +212,33 @@ describe("UsageDashboardComponent", () => {
 			expect(quotaLines[0]).toContain("10%");
 			expect(quotaLines[1]).toContain("84%");
 			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(72);
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("shows the exhausted icon even when an absolute-only exhausted window sorts last (F8)", () => {
+		const withHiddenExhaustion = report("anthropic", "a@test", [
+			limit("anthropic", "a", "7d", "Claude 7 Day", 0.5, "ok"),
+			{
+				id: "anthropic:a:extra",
+				label: "Claude Extra Usage",
+				scope: { provider: "anthropic", accountId: "a", windowId: "extra" },
+				amount: { used: 12.34, unit: "usd" },
+				status: "exhausted",
+			},
+		]);
+		const card = buildCredentialCard(withHiddenExhaustion, Date.now());
+		// The absolute-only exhausted window has no fraction, so the
+		// most-pressing-first sort puts it after the 50%-used fraction window.
+		expect(card.windows[0].status).toBe("ok");
+		expect(card.windows[1].status).toBe("exhausted");
+
+		const component = dashboard(withHiddenExhaustion);
+		try {
+			const lines = component.render(72).map(line => Bun.stripANSI(line));
+			expect(lines.some(line => line.includes(theme.status.error))).toBe(true);
+			expect(lines.some(line => line.includes(theme.status.success))).toBe(false);
 		} finally {
 			component.dispose();
 		}

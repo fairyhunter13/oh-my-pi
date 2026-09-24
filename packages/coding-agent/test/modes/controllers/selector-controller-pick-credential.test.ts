@@ -131,3 +131,46 @@ describe("SelectorController.pickCredential", () => {
 		await expect(pending).resolves.toBeUndefined();
 	});
 });
+
+describe("SelectorController #handleOAuthLogin (re-login)", () => {
+	it("passes the picked row's id as replaceCredentialId into oauth.login, and skips naming a re-login", async () => {
+		const { ctx, editorContainer } = createCtx();
+		const existing = row({ id: 42, provider: "anthropic", label: "Work" });
+		const loginCalls: Array<{ providerId: string; replaceCredentialId: number | undefined }> = [];
+		const authStorage = {
+			listCredentials: () => [existing],
+			oauth: {
+				login: async (providerId: string, opts: { replaceCredentialId?: number }) => {
+					loginCalls.push({ providerId, replaceCredentialId: opts.replaceCredentialId });
+					return { type: "oauth", email: "work@example.test", credentialId: existing.id };
+				},
+			},
+		};
+		Object.assign(ctx, {
+			session: {
+				modelRegistry: { authStorage, refreshProvider: async () => {} },
+				sessionId: "session-1",
+			},
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+			showWarning: vi.fn(),
+			present: vi.fn(),
+		});
+
+		const controller = new SelectorController(ctx);
+		const pending = controller.showOAuthSelector("anthropic");
+
+		// The credential picker mounts first (newItem renders before the stored
+		// row); down then select re-logs in as the existing row.
+		const picker = mountedPicker(editorContainer);
+		picker.handleInput("\x1b[B");
+		picker.handleInput("\n");
+
+		await pending;
+
+		expect(loginCalls).toEqual([{ providerId: "anthropic", replaceCredentialId: 42 }]);
+		// A re-login keeps the row's existing name and scope: the editor is
+		// restored directly, with no "Name this credential" prompt mounted.
+		expect(editorContainer.children).toEqual([ctx.editor]);
+	});
+});

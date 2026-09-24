@@ -7,6 +7,34 @@ import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 
+/** The ACP "no such credential" text — the TUI shows the identical warning (F7). */
+export function usageTargetNotFoundText(target: string): string {
+	return `No stored credential matches "${target}". List choices with \`/usage\`.`;
+}
+
+/**
+ * Resolve `<provider>/<credential id>` or `<provider>/active` against a row
+ * list. Shared by the ACP `/usage show` text and the TUI `/usage show`
+ * command (F7), so both surfaces resolve one target the same way.
+ */
+export function resolveUsageRowByTarget(
+	rows: readonly CredentialSummary[],
+	target: string,
+): CredentialSummary | undefined {
+	const slash = target.indexOf("/");
+	if (slash <= 0) return undefined;
+	const providerId = target.slice(0, slash);
+	const idPart = target
+		.slice(slash + 1)
+		.trim()
+		.toLowerCase();
+	return rows.find(candidate => {
+		if (candidate.provider !== providerId) return false;
+		if (idPart === "active") return candidate.active;
+		return /^\d+$/.test(idPart) && candidate.id === Number(idPart);
+	});
+}
+
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
 	if (!windowLabel) return "";
 	const normalizedLabel = label.toLowerCase();
@@ -222,19 +250,8 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime, arg = "
 		return lines.join("\n");
 	}
 
-	const notFound = `No stored credential matches "${target}". List choices with \`/usage\`.`;
-	const slash = target.indexOf("/");
-	if (slash <= 0) return notFound;
-	const providerId = target.slice(0, slash);
-	const idPart = target
-		.slice(slash + 1)
-		.trim()
-		.toLowerCase();
-	const row = rows.find(candidate => {
-		if (candidate.provider !== providerId) return false;
-		if (idPart === "active") return candidate.active;
-		return /^\d+$/.test(idPart) && candidate.id === Number(idPart);
-	});
+	const notFound = usageTargetNotFoundText(target);
+	const row = resolveUsageRowByTarget(rows, target);
 	if (!row) return notFound;
 
 	const stored = authStorage.credentials.list(row.provider).find(entry => entry.id === row.id);

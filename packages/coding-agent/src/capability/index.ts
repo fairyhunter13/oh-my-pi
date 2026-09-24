@@ -25,6 +25,7 @@ import type {
 
 import { cfgDisabledExtensions } from "../extensibility/settings";
 import { cfgDisabledProviders, cfgEnabledProviders } from "../config/model-settings";
+import { cfgTaskProjectClaudeAgents } from "../task/settings";
 
 // =============================================================================
 // Registry State
@@ -415,6 +416,18 @@ export function enableProvider(providerId: string): void {
  */
 export function isProviderEnabled(providerId: string): boolean {
 	return !disabledProviders().has(providerId);
+}
+
+/**
+ * Whether a repo's own `.claude/agents` load as task agents (F2/F3). Distinct
+ * from {@link isProviderEnabled}: `disabledProviders: ["claude"]` blocks
+ * `~/.claude`'s CLAUDE.md, commands and MCP config, and must not also block a
+ * repo's own agents. Defaults to `true` when no settings are loaded yet
+ * (tests that never call {@link initializeWithSettings}).
+ */
+export function isProjectClaudeAgentsEnabled(): boolean {
+	const settings = boundSettings();
+	return settings ? cfgTaskProjectClaudeAgents.get(settings) : true;
 }
 
 /**

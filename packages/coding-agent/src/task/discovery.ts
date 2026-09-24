@@ -12,9 +12,12 @@
  *     `hooks/`, `tools/`, etc. by `discovery/omp-plugins.ts`.
  *
  * Claude Code marketplace plugin agents are discovered separately via the
- * claude-plugins provider. A repo's own `.claude/agents` loads while the
- * `claude` provider is enabled, with its Claude model aliases dropped and its
- * tool names normalized. User `~/.claude/agents`, `.codex/agents` and
+ * claude-plugins provider. A repo's own `.claude/agents` loads while
+ * `task.projectClaudeAgents` is on (default), independent of whether the
+ * `claude` provider itself is disabled — that switch keeps `~/.claude`'s
+ * CLAUDE.md, commands and MCP config out of omp, not a repo's own agents.
+ * The repo's own agents load with their Claude model aliases dropped and
+ * their tool names normalized. User `~/.claude/agents`, `.codex/agents` and
  * `.gemini/agents` stay skipped.
  *
  * Agent files use markdown with YAML frontmatter.
@@ -23,7 +26,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import { isProjectClaudeAgentsEnabled, isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
@@ -107,8 +110,16 @@ export async function discoverAgents(
 	const orderedDirs: AgentDirectory[] = [];
 	const project = projectDirs[0];
 	if (project) orderedDirs.push({ dir: project.path, source: "project" });
-	const claudeProject = isProviderEnabled("claude")
-		? nearestProjectDirs.find(entry => entry.source === CLAUDE_AGENT_CONFIG_SOURCE)
+	// F2: the walk-up in findAllNearestProjectConfigDirs has no ceiling at
+	// `home`, so it reaches Claude Code's own user agents dir
+	// (`~/.claude/agents`, a symlink to `~/.claude-shared/agents`) in every
+	// repo under home with no nearer `.claude/agents` of its own. That dir is
+	// not a repo's own agents, so it is never a candidate here.
+	const homeClaudeAgentsDir = path.join(home, ".claude", "agents");
+	const claudeProject = isProjectClaudeAgentsEnabled()
+		? nearestProjectDirs.find(
+				entry => entry.source === CLAUDE_AGENT_CONFIG_SOURCE && entry.path !== homeClaudeAgentsDir,
+			)
 		: undefined;
 	if (claudeProject) orderedDirs.push({ dir: claudeProject.path, source: "project", ignoreModel: true });
 	const user = userDirs[0];

@@ -614,6 +614,22 @@ describe("auth-broker wire surface", () => {
 			body: JSON.stringify({ installId: "x", entries: [{ at: "not-a-number" }] }),
 		});
 		expect(bad.status).toBe(400);
+
+		// F10: a non-digit credentialId (e.g. "3abc") must not silently parse
+		// as 3 — reject it the same as a missing one.
+		const malformedCredentialId = await fetch(
+			`${handle!.url}/v1/usage/clients?provider=anthropic&credentialId=3abc`,
+			{ headers: { Authorization: `Bearer ${token}` } },
+		);
+		expect(malformedCredentialId.status).toBe(400);
+		const validCredentialId = await fetch(`${handle!.url}/v1/usage/clients?provider=anthropic&credentialId=3`, {
+			headers: { Authorization: `Bearer ${token}` },
+		});
+		expect(validCredentialId.status).toBe(200);
+		const noneCredentialId = await fetch(`${handle!.url}/v1/usage/clients?provider=anthropic&credentialId=none`, {
+			headers: { Authorization: `Bearer ${token}` },
+		});
+		expect(noneCredentialId.status).toBe(200);
 	});
 
 	test("Unknown route returns 404", async () => {

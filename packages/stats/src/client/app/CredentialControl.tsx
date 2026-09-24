@@ -4,6 +4,8 @@ import { getCredentials } from "../api";
 export interface CredentialControlProps {
 	value: string | null;
 	onChange: (value: string | null) => void;
+	/** Bumped after a sync completes (F4): a fresh row's credential now exists. */
+	refreshTrigger?: number;
 	className?: string;
 }
 
@@ -13,7 +15,7 @@ export interface CredentialControlProps {
  * other option is one stored `auth_credentials` row or a provider's
  * `<provider> · unattributed` bucket.
  */
-export function CredentialControl({ value, onChange, className = "" }: CredentialControlProps) {
+export function CredentialControl({ value, onChange, refreshTrigger, className = "" }: CredentialControlProps) {
 	const [options, setOptions] = useState<{ id: string; label: string }[]>([]);
 
 	useEffect(() => {
@@ -29,7 +31,7 @@ export function CredentialControl({ value, onChange, className = "" }: Credentia
 		return () => {
 			cancelled = true;
 		};
-	}, []);
+	}, [refreshTrigger]);
 
 	return (
 		<select

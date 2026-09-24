@@ -126,6 +126,7 @@ export default function App() {
 				onCredentialChange={setCredential}
 				updatedAt={updatedAt}
 				onSyncComplete={handleSyncComplete}
+				refreshTrigger={refreshTrigger}
 			>
 				{[...mountedRef.current].map(target => (
 					<div key={target} hidden={target !== active}>

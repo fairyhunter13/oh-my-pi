@@ -54,7 +54,7 @@ export interface CardWindowRow {
 	/** Mean used fraction across accounts (0..1, >1 = overage); undefined when unreported. */
 	fraction: number | undefined;
 	status: UsageLimit["status"];
-	/** Reset countdown of the worst account, ms from now, when in the future. */
+	/** Reset countdown of this window, ms from now, when in the future. */
 	resetMs?: number;
 	/** Absolute one-sided amount (e.g. `$12.34 used`, `100 credits left`) for limits without a fraction. */
 	usedText?: string;
@@ -394,7 +394,13 @@ export class UsageDashboardComponent implements Component {
 
 	#renderCardLines(card: CredentialCard, width: number, labels: string[][], layout: CardRowLayout): string[] {
 		const lines: string[] = [];
-		const cardStatus = card.unlimited ? "ok" : (card.windows[0]?.status ?? "unknown");
+		const cardStatus = card.unlimited
+			? "ok"
+			: card.windows.some(w => w.status === "exhausted")
+				? "exhausted"
+				: card.windows.some(w => w.status === "warning")
+					? "warning"
+					: (card.windows[0]?.status ?? "unknown");
 		const title = theme.bold(truncateToWidth(card.name, Math.max(4, width - 2)));
 		const titlePad = Math.max(0, width - 2 - visibleWidth(title));
 		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}`);

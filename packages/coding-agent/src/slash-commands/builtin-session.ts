@@ -383,8 +383,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
-			if (!verb || (verb === "show" && !rest)) {
-				await runtime.ctx.handleUsageCommand();
+			if (!verb || verb === "show") {
+				await runtime.ctx.handleUsageCommand(rest || undefined);
 				runtime.ctx.editor.setText("");
 				return;
 			}
