@@ -1067,19 +1067,25 @@ function basenameTimestamp(base: string): number | undefined {
 // Short-TTL memo for the disk sweep behind /api/sessions (30s poll): the
 // session list changes only on create/edit, so readdir+stat of every file per
 // poll is pure syscall churn. TTL is deliberately short so a just-created
-// session appears within seconds.
+// session appears within seconds. The memo is keyed on the sessions directory, so a
+// changed agent directory never reads another directory's roots.
 let diskRootsMemo:
-	| { atMs: number; limit: number; roots: Array<{ file: string; mtimeMs: number; startedAt: number }> }
+	| {
+			sessionsDir: string;
+			atMs: number;
+			limit: number;
+			roots: Array<{ file: string; mtimeMs: number; startedAt: number }>;
+	  }
 	| undefined;
 const DISK_ROOTS_TTL_MS = 5_000;
 
 async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtimeMs: number; startedAt: number }>> {
 	const now = Date.now();
+	const sessionsDir = getSessionsDir();
 	const memo = diskRootsMemo;
-	if (memo && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
+	if (memo && memo.sessionsDir === sessionsDir && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
 		return memo.roots.slice(0, limit);
 	}
-	const sessionsDir = getSessionsDir();
 	let projects: string[] = [];
 	try {
 		projects = await fs.readdir(sessionsDir);
@@ -1111,7 +1117,7 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
 		}),
 	);
 	roots.sort((a, b) => b.mtimeMs - a.mtimeMs);
-	if (roots.length <= 1000) diskRootsMemo = { atMs: Date.now(), limit, roots };
+	if (roots.length <= 1000) diskRootsMemo = { sessionsDir, atMs: Date.now(), limit, roots };
 	return roots.slice(0, limit);
 }
 
