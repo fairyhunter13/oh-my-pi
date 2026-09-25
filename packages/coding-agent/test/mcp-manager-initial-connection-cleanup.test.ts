@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { MCP_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { TOOL_NAME as DELAYED_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
@@ -46,6 +47,7 @@ function fakeConnection(name: string): { connection: MCPServerConnection; transp
 			transport,
 			serverInfo: { name: "fake", version: "1.0.0" },
 			capabilities: { tools: {} },
+			protocolVersion: MCP_PROTOCOL_VERSION,
 		},
 		transport,
 	};

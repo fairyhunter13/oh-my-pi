@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPImageContent } from "@oh-my-pi/pi-tui/tools/mcp";
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { MCP_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -41,6 +42,7 @@ function makeConnection(transport: MCPTransport, name = "test-server"): MCPServe
 		transport,
 		serverInfo: { name: "test", version: "1.0" },
 		capabilities: { tools: {} },
+		protocolVersion: MCP_PROTOCOL_VERSION,
 	};
 }
 

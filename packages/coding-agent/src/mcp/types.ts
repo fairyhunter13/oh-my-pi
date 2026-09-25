@@ -174,6 +174,9 @@ export interface MCPConfigFile {
  */
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
 
+/** MCP protocol revision negotiated inline via `server/discover`, without a legacy `initialize` handshake. */
+export const MCP_MODERN_PROTOCOL_VERSION = "2026-07-28";
+
 /** Optionally-sized icon for MCP UI metadata (implementation, tools, resources). */
 export interface MCPIcon {
 	src: string;
@@ -312,7 +315,7 @@ export interface MCPTransport {
 	 * every subsequent request; transports that need no per-request version
 	 * (stdio) omit this.
 	 */
-	setProtocolVersion?(version: string): void;
+	setProtocolVersion?(version: string | null): void;
 
 	/** Whether the transport is connected */
 	readonly connected: boolean;
@@ -354,6 +357,8 @@ export interface MCPServerConnection {
 	resourceTemplates?: MCPResourceTemplate[];
 	/** Server instructions from initialize */
 	instructions?: string;
+	/** Protocol revision negotiated with this server: `MCP_PROTOCOL_VERSION` or `MCP_MODERN_PROTOCOL_VERSION`. */
+	protocolVersion: string;
 	/** Cached prompts (populated on demand) */
 	prompts?: MCPPrompt[];
 }

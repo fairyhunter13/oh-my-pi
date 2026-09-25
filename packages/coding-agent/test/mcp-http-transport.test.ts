@@ -70,6 +70,9 @@ describe("MCP Streamable HTTP initialization", () => {
 
 				const body = (await req.json()) as { id?: string | number; method: string };
 				requests.push(body.method);
+				if (body.method === "server/discover") {
+					return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "Method not found" } });
+				}
 				if (body.method === "initialize") {
 					const response = {
 						jsonrpc: "2.0",
@@ -99,7 +102,7 @@ describe("MCP Streamable HTTP initialization", () => {
 			timeout: GUARD_TIMEOUT_MS,
 		});
 
-		expect(requests).toEqual(["initialize", "notifications/initialized", "GET"]);
+		expect(requests).toEqual(["server/discover", "initialize", "notifications/initialized", "GET"]);
 		await connection.transport.close();
 	});
 });

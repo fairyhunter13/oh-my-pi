@@ -16,7 +16,7 @@ import type {
 	MCPSseServerConfig,
 	MCPTransport,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
+import { MCP_MODERN_PROTOCOL_VERSION, toJsonRpcError } from "../../mcp/types";
 import {
 	createMCPJsonRpcError,
 	type MCPFailureStage,
@@ -36,6 +36,25 @@ import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
 
 const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 const DEFAULT_SSE_RETRY_MS = 3_000;
+
+/**
+ * Methods whose 2026-07-28 request carries an `Mcp-Name` header. Maps each
+ * modern method to the params key that names the request (see
+ * `mcp/shared/inbound.py:59-77` in the coderag/graphrag server SDK).
+ */
+const MODERN_NAME_PARAM: Record<string, string> = {
+	"tools/call": "name",
+	"prompts/get": "name",
+	"resources/read": "uri",
+};
+
+const HEADER_SAFE = /^[\x20-\x7E]*$/;
+
+/** Encode a header value for the 2026-07-28 wire: ASCII passes through, everything else is RFC 2047 base64 (mirrors the server's `encode_header_value`, `mcp/shared/inbound.py:148-158`). */
+function encodeHeaderValue(value: string): string {
+	if (HEADER_SAFE.test(value)) return value;
+	return `=?base64?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}
 
 interface SSEResumeState {
 	lastEventId: string | null;
@@ -171,8 +190,8 @@ export class HttpTransport implements MCPTransport {
 		);
 	}
 
-	/** Record the protocol version negotiated during `initialize`. */
-	setProtocolVersion(version: string): void {
+	/** Record the protocol version negotiated during `initialize`, or reset it to null (modern discover fallback). */
+	setProtocolVersion(version: string | null): void {
 		this.#protocolVersion = version;
 	}
 
@@ -456,6 +475,16 @@ export class HttpTransport implements MCPTransport {
 
 		if (this.#sessionId) {
 			generated["Mcp-Session-Id"] = this.#sessionId;
+		}
+
+		if (this.#protocolVersion === MCP_MODERN_PROTOCOL_VERSION) {
+			generated["Mcp-Method"] = method;
+			const nameKey = MODERN_NAME_PARAM[method];
+			if (nameKey) {
+				generated["Mcp-Name"] = encodeHeaderValue(
+					String((params as Record<string, unknown> | undefined)?.[nameKey] ?? ""),
+				);
+			}
 		}
 
 		// Caller cancellation owns this request only until its response arrives;

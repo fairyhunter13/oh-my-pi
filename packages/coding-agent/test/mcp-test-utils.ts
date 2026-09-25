@@ -1,4 +1,5 @@
 import type { MCPServerCapabilities, MCPServerConnection, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { MCP_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/mcp/types";
 
 export function createMockTransport(
 	responses: Map<string, unknown[]>,
@@ -32,5 +33,6 @@ export function createMockConnection(
 		transport,
 		serverInfo: { name: "test", version: "1.0" },
 		capabilities,
+		protocolVersion: MCP_PROTOCOL_VERSION,
 	};
 }

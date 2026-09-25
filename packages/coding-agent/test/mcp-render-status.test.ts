@@ -6,6 +6,7 @@ import { renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import { DeferredMCPTool, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import type { MCPServerConnection, MCPToolDefinition, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { MCP_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { theme as activeTheme, getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -48,6 +49,7 @@ function makeConnection(): MCPServerConnection {
 		transport,
 		serverInfo: { name: "sentry", version: "1.0.0" },
 		capabilities: { tools: {} },
+		protocolVersion: MCP_PROTOCOL_VERSION,
 	};
 }
 

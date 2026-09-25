@@ -3,6 +3,7 @@ import type { CustomToolContext } from "../src/extensibility/custom-tools/types"
 import { MCPManager } from "../src/mcp/manager";
 import { MCPTool } from "../src/mcp/tool-bridge";
 import type { MCPRequestOptions, MCPServerConnection, MCPToolDefinition, MCPTransport } from "../src/mcp/types";
+import { MCP_PROTOCOL_VERSION } from "../src/mcp/types";
 import { createMCPProxyTools } from "../src/task/executor";
 import { ToolAbortError } from "../src/tools/tool-errors";
 
@@ -35,6 +36,7 @@ function createFakeConnection() {
 		transport,
 		serverInfo: { name: "test", version: "1" },
 		capabilities: {},
+		protocolVersion: MCP_PROTOCOL_VERSION,
 	};
 
 	return {

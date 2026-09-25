@@ -18,6 +18,7 @@ import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { listResourceTemplates } from "../src/mcp/client";
 import { MCPManager } from "../src/mcp/manager";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "../src/mcp/types";
+import { MCP_PROTOCOL_VERSION } from "../src/mcp/types";
 import { RESOURCE_URIS } from "./fixtures/resources-no-templates-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "resources-no-templates-mcp.ts");
@@ -40,6 +41,7 @@ function makeResourceConnection(transport: MCPTransport): MCPServerConnection {
 		transport,
 		serverInfo: { name: "docs", version: "1.0" },
 		capabilities: { resources: {} },
+		protocolVersion: MCP_PROTOCOL_VERSION,
 	};
 }
 

@@ -10,10 +10,12 @@ import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./
 import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
+import { MCPTransportError } from "./errors";
 import type {
 	MCPGetPromptParams,
 	MCPGetPromptResult,
 	MCPHttpServerConfig,
+	MCPImplementation,
 	MCPInitializeParams,
 	MCPInitializeResult,
 	MCPPrompt,
@@ -38,7 +40,7 @@ import type {
 	MCPTransport,
 } from "./types";
 
-import { MCP_PROTOCOL_VERSION } from "./types";
+import { MCP_MODERN_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION } from "./types";
 
 /** Client info sent during initialization */
 const CLIENT_INFO = {
@@ -83,6 +85,146 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
 		default:
 			throw new Error(`Unknown server type: ${serverType}`);
 	}
+}
+
+/** `_meta` block every 2026-07-28 request carries (`server/discover`, and every `send` round). */
+function modernMeta(): Record<string, unknown> {
+	return {
+		"io.modelcontextprotocol/protocolVersion": MCP_MODERN_PROTOCOL_VERSION,
+		"io.modelcontextprotocol/clientCapabilities": { roots: { listChanged: false } },
+		"io.modelcontextprotocol/clientInfo": CLIENT_INFO,
+	};
+}
+
+/** `server/discover` response shape (2026-07-28). */
+interface MCPDiscoverResult {
+	supportedVersions?: string[];
+	capabilities?: MCPServerCapabilities;
+	instructions?: string;
+	_meta?: Record<string, unknown>;
+}
+
+/** Result of a successful modern handshake, shaped like the legacy `initialize` result this replaces. */
+interface MCPModernDiscovery {
+	protocolVersion: string;
+	capabilities: MCPServerCapabilities;
+	serverInfo: MCPImplementation;
+	instructions?: string;
+}
+
+/** HTTP statuses a 2026-07-28 discover probe against a legacy server answers with. */
+const LEGACY_DISCOVER_HTTP_STATUS: readonly number[] = [400, 404, 405, 406];
+
+/**
+ * Probe a freshly created transport for the 2026-07-28 wire via `server/discover`.
+ * Returns `undefined` — and resets the transport's protocol version — when the
+ * server answers with a legacy JSON-RPC "method not found" or one of the HTTP
+ * statuses a legacy server gives an unknown route. Any other error (timeout,
+ * auth, 5xx) is the same failure the legacy path would hit, so it rethrows.
+ */
+async function discoverModern(transport: MCPTransport, signal?: AbortSignal): Promise<MCPModernDiscovery | undefined> {
+	transport.setProtocolVersion?.(MCP_MODERN_PROTOCOL_VERSION);
+
+	let result: MCPDiscoverResult;
+	try {
+		result = await transport.request<MCPDiscoverResult>("server/discover", { _meta: modernMeta() }, { signal });
+	} catch (error) {
+		const isLegacyServer =
+			error instanceof MCPTransportError &&
+			(error.failure === "json_rpc" ||
+				(error.failure === "http_status" &&
+					typeof error.code === "number" &&
+					LEGACY_DISCOVER_HTTP_STATUS.includes(error.code)));
+		if (isLegacyServer) {
+			transport.setProtocolVersion?.(null);
+			return undefined;
+		}
+		throw error;
+	}
+
+	if (!result.supportedVersions?.includes(MCP_MODERN_PROTOCOL_VERSION)) {
+		transport.setProtocolVersion?.(null);
+		return undefined;
+	}
+
+	return {
+		protocolVersion: MCP_MODERN_PROTOCOL_VERSION,
+		capabilities: result.capabilities ?? {},
+		serverInfo:
+			(result._meta?.["io.modelcontextprotocol/serverInfo"] as MCPImplementation | undefined) ?? {
+				name: "unknown",
+				version: "",
+			},
+		instructions: result.instructions,
+	};
+}
+
+/** Bound on `server/discover`-style input round trips (`roots/list` and similar) before `send` gives up. */
+const MAX_INPUT_ROUNDS = 4;
+
+/** One entry of a 2026-07-28 `input_required` result's `inputRequests` map. */
+interface MCPModernInputRequest {
+	method: string;
+	params?: unknown;
+}
+
+/** A 2026-07-28 method result, either complete (spread as `T`) or asking for client input. */
+interface MCPModernResult {
+	resultType?: "complete" | "input_required";
+	inputRequests?: Record<string, MCPModernInputRequest>;
+	requestState?: string;
+}
+
+/**
+ * Send one MCP method call, transparently answering any 2026-07-28
+ * `input_required` round (e.g. `roots/list`) with the connection's request
+ * handler before returning the server's `complete` result. Legacy connections
+ * pass straight through to `transport.request`, unchanged from before this
+ * function existed.
+ */
+async function send<T>(
+	connection: MCPServerConnection,
+	method: string,
+	params: Record<string, unknown> = {},
+	options?: MCPRequestOptions,
+): Promise<T> {
+	if (connection.protocolVersion !== MCP_MODERN_PROTOCOL_VERSION) {
+		return connection.transport.request<T>(method, params, options);
+	}
+
+	let inputResponses: Record<string, unknown> | undefined;
+	let requestState: string | undefined;
+
+	for (let round = 0; round <= MAX_INPUT_ROUNDS; round++) {
+		const body: Record<string, unknown> = {
+			...params,
+			_meta: { ...(params._meta as Record<string, unknown> | undefined), ...modernMeta() },
+			...(inputResponses && { inputResponses }),
+			...(requestState && { requestState }),
+		};
+
+		const result = await connection.transport.request<MCPModernResult & Record<string, unknown>>(
+			method,
+			body,
+			options,
+		);
+		if (result.resultType !== "input_required") {
+			return result as unknown as T;
+		}
+
+		const responses: Record<string, unknown> = {};
+		for (const [key, req] of Object.entries(result.inputRequests ?? {})) {
+			try {
+				responses[key] = await (connection.transport.onRequest ?? defaultRequestHandler)(req.method, req.params);
+			} catch {
+				throw new Error(`MCP server "${connection.name}" asked for ${req.method}, which this client does not answer`);
+			}
+		}
+		inputResponses = responses;
+		requestState = result.requestState;
+	}
+
+	throw new Error(`MCP server "${connection.name}" still required input after ${MAX_INPUT_ROUNDS} rounds`);
 }
 
 /**
@@ -172,6 +314,24 @@ export async function connectToServer(
 		transport.onRequest = options?.onRequest ?? defaultRequestHandler;
 
 		try {
+			if (config.type === "http") {
+				const modern = await discoverModern(transport, options?.signal);
+				if (modern) {
+					const capabilities = modern.capabilities.resources
+						? { ...modern.capabilities, resources: { ...modern.capabilities.resources, subscribe: false } }
+						: modern.capabilities;
+					return {
+						name,
+						config,
+						transport,
+						serverInfo: modern.serverInfo,
+						capabilities,
+						instructions: modern.instructions,
+						protocolVersion: MCP_MODERN_PROTOCOL_VERSION,
+					};
+				}
+			}
+
 			const initResult = await initializeConnection(transport, {
 				signal: options?.signal,
 				async onInitialized() {
@@ -190,6 +350,7 @@ export async function connectToServer(
 				serverInfo: initResult.serverInfo,
 				capabilities: initResult.capabilities,
 				instructions: initResult.instructions,
+				protocolVersion: initResult.protocolVersion,
 			};
 		} catch (error) {
 			await transport.close();
@@ -238,7 +399,7 @@ export async function listTools(
 			params.cursor = cursor;
 		}
 
-		const result = await connection.transport.request<MCPToolsListResult>("tools/list", params, options);
+		const result = await send<MCPToolsListResult>(connection, "tools/list", params, options);
 		allTools.push(...result.tools);
 		cursor = result.nextCursor;
 	} while (cursor);
@@ -263,11 +424,7 @@ export async function callTool(
 		arguments: args,
 	};
 
-	return connection.transport.request<MCPToolCallResult>(
-		"tools/call",
-		params as unknown as Record<string, unknown>,
-		options,
-	);
+	return send<MCPToolCallResult>(connection, "tools/call", params as unknown as Record<string, unknown>, options);
 }
 
 /**
@@ -308,7 +465,7 @@ export async function listResources(
 			params.cursor = cursor;
 		}
 
-		const result = await connection.transport.request<MCPResourcesListResult>("resources/list", params, options);
+		const result = await send<MCPResourcesListResult>(connection, "resources/list", params, options);
 		allResources.push(...result.resources);
 		cursor = result.nextCursor;
 	} while (cursor);
@@ -356,11 +513,7 @@ export async function listResourceTemplates(
 				params.cursor = cursor;
 			}
 
-			const result = await connection.transport.request<MCPResourceTemplatesListResult>(
-				"resources/templates/list",
-				params,
-				options,
-			);
+			const result = await send<MCPResourceTemplatesListResult>(connection, "resources/templates/list", params, options);
 			allTemplates.push(...result.resourceTemplates);
 			cursor = result.nextCursor;
 		} while (cursor);
@@ -388,11 +541,7 @@ export async function readResource(
 	options?: MCPRequestOptions,
 ): Promise<MCPResourceReadResult> {
 	const params: MCPResourceReadParams = { uri };
-	return connection.transport.request<MCPResourceReadResult>(
-		"resources/read",
-		params as unknown as Record<string, unknown>,
-		options,
-	);
+	return send<MCPResourceReadResult>(connection, "resources/read", params as unknown as Record<string, unknown>, options);
 }
 
 /**
@@ -407,11 +556,7 @@ export async function subscribeToResources(
 	const results = await Promise.allSettled(
 		uris.map(uri => {
 			const params: MCPResourceSubscribeParams = { uri };
-			return connection.transport.request(
-				"resources/subscribe",
-				params as unknown as Record<string, unknown>,
-				options,
-			);
+			return send(connection, "resources/subscribe", params as unknown as Record<string, unknown>, options);
 		}),
 	);
 	for (const result of results) {
@@ -433,11 +578,7 @@ export async function unsubscribeFromResources(
 	const results = await Promise.allSettled(
 		uris.map(uri => {
 			const params: MCPResourceSubscribeParams = { uri };
-			return connection.transport.request(
-				"resources/unsubscribe",
-				params as unknown as Record<string, unknown>,
-				options,
-			);
+			return send(connection, "resources/unsubscribe", params as unknown as Record<string, unknown>, options);
 		}),
 	);
 	for (const result of results) {
@@ -485,7 +626,7 @@ export async function listPrompts(
 			params.cursor = cursor;
 		}
 
-		const result = await connection.transport.request<MCPPromptsListResult>("prompts/list", params, options);
+		const result = await send<MCPPromptsListResult>(connection, "prompts/list", params, options);
 		allPrompts.push(...result.prompts);
 		cursor = result.nextCursor;
 	} while (cursor);
@@ -508,11 +649,7 @@ export async function getPrompt(
 		params.arguments = args;
 	}
 
-	return connection.transport.request<MCPGetPromptResult>(
-		"prompts/get",
-		params as unknown as Record<string, unknown>,
-		options,
-	);
+	return send<MCPGetPromptResult>(connection, "prompts/get", params as unknown as Record<string, unknown>, options);
 }
 
 /**

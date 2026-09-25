@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { MCP_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import * as mcpConfigWriter from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -93,6 +94,7 @@ describe("interactive /mcp test", () => {
 			transport,
 			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
 			capabilities: {},
+			protocolVersion: MCP_PROTOCOL_VERSION,
 		};
 		const connectToServer = vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
 		const listTools = vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
@@ -223,6 +225,7 @@ describe("interactive /mcp test", () => {
 			transport,
 			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
 			capabilities: {},
+			protocolVersion: MCP_PROTOCOL_VERSION,
 		};
 		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
 		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
@@ -343,6 +346,7 @@ describe("interactive /mcp test", () => {
 			transport: { connected: true, request: vi.fn(), notify: vi.fn(), close: vi.fn(async () => {}) },
 			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
 			capabilities: {},
+			protocolVersion: MCP_PROTOCOL_VERSION,
 		};
 		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
 		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
