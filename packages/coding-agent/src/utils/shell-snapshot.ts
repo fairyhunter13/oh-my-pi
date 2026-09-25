@@ -12,7 +12,17 @@ import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
 const cachedSnapshotPaths = new Map<string, string>();
+// A creation that outlived its caller's budget. Later calls neither wait on it nor
+// start another, and whatever it settles to is the answer for this process.
+const pendingSnapshots = new Map<string, Promise<string | null>>();
+// Not retried: a retry costs the caller's whole budget, on the same rc, and fails
+// the same way. Before this, a slow rc added the budget to every bash call.
+const failedSnapshots = new Set<string>();
+// Snapshot processes still running, with the file each one writes, for the exit hook.
+const runningChildren = new Map<Bun.Subprocess, string>();
 const SNAPSHOT_TIMEOUT_MS = 2_000;
+// How long a creation may keep running after its caller stopped waiting.
+const SNAPSHOT_HARD_TIMEOUT_MS = 30_000;
 
 /**
  * Characters that force brush's primitive alias expander down a path it does
@@ -231,15 +241,19 @@ fi
 
 /**
  * Create a shell snapshot, caching the result.
- * Returns the path to the snapshot file, or null if creation failed.
+ * Returns the path to the snapshot file, or null if none is ready yet or creation failed.
  *
- * `timeoutMs` is configurable so callers exercising failure handling do not
- * have to wait out the production startup budget.
+ * The caller waits at most `timeoutMs`. A creation still running then keeps going
+ * in the background, up to `hardTimeoutMs`, and a later call gets its snapshot.
+ * A failure is cached too, so no later call pays the budget again.
+ * Both are configurable so callers exercising failure handling do not have to
+ * wait out the production budgets.
  */
 export async function getOrCreateSnapshot(
 	shell: string,
 	env: Record<string, string | undefined>,
 	timeoutMs = SNAPSHOT_TIMEOUT_MS,
+	hardTimeoutMs = SNAPSHOT_HARD_TIMEOUT_MS,
 ): Promise<string | null> {
 	const cacheKey = shell;
 	// Return cached snapshot if valid
@@ -255,9 +269,34 @@ export async function getOrCreateSnapshot(
 	if (process.platform === "win32") {
 		return null;
 	}
+	if (failedSnapshots.has(cacheKey) || pendingSnapshots.has(cacheKey)) {
+		return null;
+	}
 
+	const creation = createSnapshot(shell, env, Math.max(timeoutMs, hardTimeoutMs)).then(snapshotPath => {
+		pendingSnapshots.delete(cacheKey);
+		if (snapshotPath) cachedSnapshotPaths.set(cacheKey, snapshotPath);
+		else failedSnapshots.add(cacheKey);
+		return snapshotPath;
+	});
+	pendingSnapshots.set(cacheKey, creation);
+	let timer: NodeJS.Timeout | undefined;
+	const budget = new Promise<null>(resolve => {
+		timer = setTimeout(() => resolve(null), timeoutMs);
+	});
+	try {
+		return await Promise.race([creation, budget]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+async function createSnapshot(
+	shell: string,
+	env: Record<string, string | undefined>,
+	killAfterMs: number,
+): Promise<string | null> {
 	const rcFile = getShellConfigFile(shell, env);
-
 	// Snapshot dir is per-uid. `os.tmpdir()` is shared between accounts on Linux and
 	// this dir is 0700 because the script may inline env-var values referenced by
 	// captured functions (#3470), so a single shared name hands the first account an
@@ -313,11 +352,17 @@ export async function getOrCreateSnapshot(
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",
-			timeout: timeoutMs,
+			timeout: killAfterMs,
 			killSignal: "SIGKILL",
 		});
-
-		await child.exited;
+		// A creation that outlives its caller must not hold a one-shot command's exit.
+		child.unref();
+		runningChildren.set(child, snapshotPath);
+		try {
+			await child.exited;
+		} finally {
+			runningChildren.delete(child);
+		}
 		if (child.exitCode === 0 && fs.existsSync(snapshotPath)) {
 			// Defence-in-depth: the script's `umask 077` already locks the file at
 			// first write, but chmod again in case the umask didn't take (exotic
@@ -328,7 +373,6 @@ export async function getOrCreateSnapshot(
 				// best-effort
 			}
 			scrubSnapshotInPlace(snapshotPath);
-			cachedSnapshotPaths.set(cacheKey, snapshotPath);
 			succeeded = true;
 			return snapshotPath;
 		}
@@ -348,6 +392,11 @@ export async function getOrCreateSnapshot(
 }
 
 postmortem.register("shell-snapshot", () => {
+	for (const [child, snapshotPath] of runningChildren) {
+		child.kill("SIGKILL");
+		fs.rmSync(snapshotPath, { force: true });
+	}
+	runningChildren.clear();
 	for (const snapshotPath of cachedSnapshotPaths.values()) {
 		fs.unlinkSync(snapshotPath);
 	}

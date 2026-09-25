@@ -404,32 +404,54 @@ describe("getOrCreateSnapshot", () => {
 		}
 	});
 
-	it("cleans up the empty snapshot file when the shell execution times out", async () => {
+	it("cleans up a timed-out creation once it fails, and never pays the budget again", async () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-timeout-"));
 		const originalTmpDir = process.env.TMPDIR;
 		process.env.TMPDIR = testRoot;
 		try {
 			const fakeShell = path.join(testRoot, "timeout-shell.sh");
-			// A short injected deadline exercises Bun's real process timeout without
-			// making the suite wait out the two-second production startup budget.
+			// Short injected budgets exercise Bun's real process timeout without
+			// making the suite wait out the production ones. The unit is a real child
+			// process, so fake timers cannot drive it; the waits below poll a condition.
 			await fs.writeFile(fakeShell, `#!/bin/sh\nsleep 1\n`);
 			await fs.chmod(fakeShell, 0o755);
 
 			const env = { ...process.env, HOME: testRoot };
 			const snapshotDir = snapshotDirIn(testRoot);
 
-			const snapshotPath = await getOrCreateSnapshot(fakeShell, env, 25);
-			expect(snapshotPath).toBeNull();
-
-			if (existsSync(snapshotDir)) {
-				const files = await fs.readdir(snapshotDir);
-				expect(files).toEqual([]);
+			expect(await getOrCreateSnapshot(fakeShell, env, 25, 100)).toBeNull();
+			const deadline = performance.now() + 3_000;
+			while (existsSync(snapshotDir) && (await fs.readdir(snapshotDir)).length > 0) {
+				expect(performance.now()).toBeLessThan(deadline);
+				await Bun.sleep(20);
 			}
+			// A slow rc used to add the budget to every bash call. The failure is cached now.
+			const started = performance.now();
+			expect(await getOrCreateSnapshot(fakeShell, env, 1_000, 1_000)).toBeNull();
+			expect(performance.now() - started).toBeLessThan(100);
 		} finally {
 			if (originalTmpDir === undefined) delete process.env.TMPDIR;
 			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
+	});
+
+	it("finishes a creation that outlived the budget and serves it to the next call", async () => {
+		if (!existsSync(REAL_BASH)) return;
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-late-"));
+		await fs.writeFile(path.join(home, ".bashrc"), [`sleep 0.4`, `late () { echo late; }`, ``].join("\n"));
+		const shellLink = path.join(home, "bash-omp-late");
+		await fs.symlink(REAL_BASH, shellLink);
+		const env = { ...process.env, HOME: home };
+
+		expect(await getOrCreateSnapshot(shellLink, env, 50)).toBeNull();
+		let snapshotPath: string | null = null;
+		for (let i = 0; i < 40 && !snapshotPath; i++) {
+			await Bun.sleep(100);
+			snapshotPath = await getOrCreateSnapshot(shellLink, env, 50);
+		}
+		expect(snapshotPath).not.toBeNull();
+		expect(await fs.readFile(snapshotPath!, "utf8")).toContain("late ()");
 	});
 
 	it("keeps snapshots in a uid-scoped dir so accounts sharing /tmp cannot collide", async () => {
