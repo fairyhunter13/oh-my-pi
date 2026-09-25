@@ -677,12 +677,17 @@ export async function listSessionFolders(): Promise<string[]> {
 }
 
 /**
- * List all session files in a folder.
+ * List all session files in a folder, in name order. A session file is named
+ * `<ISO timestamp>_<id>.jsonl`, so a fork sorts after its parent and the parent
+ * keeps the rows the fork copied.
  */
 export async function listSessionFiles(folderPath: string): Promise<string[]> {
 	try {
 		const entries = await fs.readdir(folderPath, { recursive: true, withFileTypes: true });
-		return entries.filter(e => e.isFile() && e.name.endsWith(".jsonl")).map(e => path.join(e.parentPath, e.name));
+		return entries
+			.filter(e => e.isFile() && e.name.endsWith(".jsonl"))
+			.map(e => path.join(e.parentPath, e.name))
+			.sort();
 	} catch {
 		return [];
 	}
