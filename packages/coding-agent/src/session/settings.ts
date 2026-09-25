@@ -1231,6 +1231,19 @@ export const cfgCodexResetsAutoRedeem = register({
 	},
 });
 
+/**
+ * Per-credential auto-redeem consent, keyed by the credential's durable row
+ * id (decimal string). A value of `"yes"`/`"no"` wins over
+ * {@link cfgCodexResetsAutoRedeem} for that credential only; any other value
+ * reads as absent, so an unrecognized id never disables or enables it.
+ */
+export const cfgCodexResetsAutoRedeemByCredential = register({
+	id: "codexResets.autoRedeemByCredential",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, string>,
+});
+
 export const cfgCodexResetsMinBlockedMinutes = register({
 	id: "codexResets.minBlockedMinutes",
 	type: "number",
@@ -1303,6 +1316,19 @@ export const cfgClaudeResetsAutoRedeem = register({
 			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },
 		],
 	},
+});
+
+/**
+ * Per-credential auto-redeem consent, keyed by the credential's durable row
+ * id (decimal string). A value of `"yes"`/`"no"` wins over
+ * {@link cfgClaudeResetsAutoRedeem} for that credential only; any other value
+ * reads as absent, so an unrecognized id never disables or enables it.
+ */
+export const cfgClaudeResetsAutoRedeemByCredential = register({
+	id: "claudeResets.autoRedeemByCredential",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, string>,
 });
 
 export const cfgClaudeResetsMinBlockedMinutes = register({

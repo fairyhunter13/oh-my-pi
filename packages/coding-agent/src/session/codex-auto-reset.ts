@@ -92,6 +92,30 @@ export function shouldPromptCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean 
 	return mode === "unset";
 }
 
+/**
+ * Per-credential answer wins over the provider-level mode. `byCredential`
+ * keys are the credential id as a decimal string; any value other than
+ * `"yes"`/`"no"` reads as absent, so a malformed entry never silently
+ * disables or enables a credential.
+ */
+export function effectiveAutoRedeem(
+	mode: ResetAutoRedeemMode,
+	byCredential: Readonly<Record<string, string>>,
+	credentialId: number | undefined,
+): ResetAutoRedeemMode {
+	if (credentialId !== undefined) {
+		const value = byCredential[String(credentialId)];
+		if (value === "yes" || value === "no") return value;
+	}
+	return mode;
+}
+
+/** Whether ANY credential of this provider could redeem: the provider-level mode, or a `"yes"` override. */
+export function anyAutoRedeemEnabled(mode: ResetAutoRedeemMode, byCredential: Readonly<Record<string, string>>): boolean {
+	if (mode !== "no") return true;
+	return Object.values(byCredential).some(value => value === "yes");
+}
+
 /** What woke the planner. `sweep` may only salvage; `blocked` may also restore. */
 export type CodexResetTrigger = "blocked" | "sweep";
 

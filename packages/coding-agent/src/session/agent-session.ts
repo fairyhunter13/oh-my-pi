@@ -308,14 +308,14 @@ import {
 	type CodexResetAction,
 	type CodexResetPlan,
 	type CodexResetTrigger,
+	anyAutoRedeemEnabled,
 	defaultCodexAutoRedeemCoordinator,
+	effectiveAutoRedeem,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	REDEEM_RETRY_DEFER_MS,
 	SWEEP_MIN_INTERVAL_MS,
-	shouldEvaluateCodexAutoRedeem,
-	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
@@ -424,10 +424,10 @@ import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/setti
 import { cfgBrowserEnabled, cfgBrowserFreezeOnTurnEnd, cfgBrowserIdleCloseSec } from "../tools/browser/settings";
 import {
 	cfgClaudeResets,
-	cfgClaudeResetsAutoRedeem,
+	cfgClaudeResetsAutoRedeemByCredential,
 	cfgCodeModeInputs,
 	cfgCodexResets,
-	cfgCodexResetsAutoRedeem,
+	cfgCodexResetsAutoRedeemByCredential,
 	cfgDefaultThinkingLevel,
 	cfgExternalThinking,
 	cfgPowerSleepPrevention,
@@ -442,6 +442,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 	cfgProvidersAnthropicSlowMode,
+	type ResetAutoRedeemMode,
 } from "./settings";
 import { type AnthropicSlowModeController, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 import { cfgInterruptMode } from "../modes/settings";
@@ -11261,78 +11262,111 @@ export class AgentSession implements SettingsScope {
 		]);
 		return [...codex, ...claude];
 	}
+	/** One line of eligibility evidence for {@link AgentSession.#confirmAutoRedeem}'s prompt. */
+	#formatAutoRedeemLine(action: CodexResetAction | ClaudeResetAction): string {
+		if (!("program" in action)) {
+			const codex = action;
+			return codex.reason === "blocked-account"
+				? `${codex.label} is blocked by the Codex ${(codex.blockedWindows ?? []).join(" + ") || "usage"} limit for about ${formatDuration(codex.remainingMs ?? 0)}.`
+				: `${codex.label}: a saved reset expires in ${formatDuration(codex.expiresInMs ?? 0)} (${codex.salvageWindow ?? "weekly"} window ${Math.round((codex.salvageUsedFraction ?? codex.weeklyUsedFraction ?? 0) * 100)}% used).`;
+		}
+		const claude = action;
+		const grant = claude.program === "juniper_tide" ? "5h session-only reset" : (claude.title ?? "saved reset");
+		const early = claude.requiresLimit
+			? ""
+			: " This grant permits early use before the covered window is fully blocked.";
+		return claude.reason === "blocked-account"
+			? `${claude.label}: ${grant} covers ${(claude.blockedWindows ?? []).map(formatUsageResetWindow).join(" + ")} with about ${formatDuration(claude.remainingMs ?? 0)} left.${early}`
+			: `${claude.label}: ${grant} expires in ${formatDuration(claude.expiresInMs ?? 0)}; ${formatUsageResetWindow(claude.salvageWindow ?? "")} is ${Math.round((claude.salvageUsedFraction ?? 0) * 100)}% used.${early}`;
+	}
+
 	/**
-	 * Ask before a provider's first automatic spend. Consent is persisted in
-	 * that provider's independent settings group; headless hosts only receive a
-	 * one-shot notice and never spend while the mode is unset.
+	 * Ask before spending a credential whose auto-redeem answer is unset.
+	 * Consent is per credential (`<provider>Resets.autoRedeemByCredential`),
+	 * never the provider-level mode; headless hosts only receive a one-shot
+	 * notice per batch and never spend while an answer is unset. Returns the
+	 * subset of `actions` approved ("Yes for <label>"); every other choice
+	 * ("No for <label>", "Not now", a closed dialog) approves nothing for
+	 * that one credential.
 	 */
 	async #confirmAutoRedeem(
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<boolean> {
+	): Promise<(CodexResetAction | ClaudeResetAction)[]> {
 		const first = actions[0];
-		if (!first) return false;
+		if (!first) return [];
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
-		const settingsKey = provider === "anthropic" ? "claudeResets.autoRedeem" : "codexResets.autoRedeem";
+		const byCredentialSetting =
+			provider === "anthropic" ? cfgClaudeResetsAutoRedeemByCredential : cfgCodexResetsAutoRedeemByCredential;
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI()) {
 			if (!coordinator.notifiedKeys.has(first.attemptKey)) {
 				coordinator.notifiedKeys.add(first.attemptKey);
+				const labels = actions.map(action => action.label).join(", ");
 				this.emitNotice(
 					"warning",
-					`Saved ${providerLabel} resets are eligible to spend, but auto-redeem is unset and no prompt UI is available. Run \`/usage reset\` or set ${settingsKey}.`,
+					`Saved ${providerLabel} resets are eligible for ${labels}, but auto-redeem is unset for them and no prompt UI is available. Run /usage reset, or answer in /providers → Credentials.`,
 					source,
 				);
 			}
-			return false;
+			return [];
 		}
 
-		const lines = actions.map(action => {
-			if (!("program" in action)) {
-				const codex = action;
-				return codex.reason === "blocked-account"
-					? `${codex.label} is blocked by the Codex ${(codex.blockedWindows ?? []).join(" + ") || "usage"} limit for about ${formatDuration(codex.remainingMs ?? 0)}.`
-					: `${codex.label}: a saved reset expires in ${formatDuration(codex.expiresInMs ?? 0)} (${codex.salvageWindow ?? "weekly"} window ${Math.round((codex.salvageUsedFraction ?? codex.weeklyUsedFraction ?? 0) * 100)}% used).`;
+		const approved: (CodexResetAction | ClaudeResetAction)[] = [];
+		for (const action of actions) {
+			const question = `Spend a saved ${providerLabel} rate-limit reset?\n${this.#formatAutoRedeemLine(action)}`;
+			try {
+				const choice = await runner.getUIContext().select(question, [
+					{
+						label: `Yes for ${action.label}`,
+						description: `Redeem now and remember yes for future eligible ${action.label} resets.`,
+					},
+					{
+						label: `No for ${action.label}`,
+						description: `Do not auto-redeem saved ${providerLabel} resets for ${action.label}.`,
+					},
+					{
+						label: "Not now",
+						description: "Skip this credential for now; ask again next time it is eligible.",
+					},
+				]);
+				if (choice === `Yes for ${action.label}` || choice === `No for ${action.label}`) {
+					const value = choice === `Yes for ${action.label}` ? "yes" : "no";
+					const current = byCredentialSetting.get(this.settings);
+					byCredentialSetting.set(this.settings, { ...current, [String(action.target.credentialId)]: value });
+					if (value === "yes") approved.push(action);
+				}
+			} catch (error) {
+				logger.warn(`${source} prompt failed`, { error: String(error) });
 			}
-			const claude = action;
-			const grant = claude.program === "juniper_tide" ? "5h session-only reset" : (claude.title ?? "saved reset");
-			const early = claude.requiresLimit
-				? ""
-				: " This grant permits early use before the covered window is fully blocked.";
-			return claude.reason === "blocked-account"
-				? `${claude.label}: ${grant} covers ${(claude.blockedWindows ?? []).map(formatUsageResetWindow).join(" + ")} with about ${formatDuration(claude.remainingMs ?? 0)} left.${early}`
-				: `${claude.label}: ${grant} expires in ${formatDuration(claude.expiresInMs ?? 0)}; ${formatUsageResetWindow(claude.salvageWindow ?? "")} is ${Math.round((claude.salvageUsedFraction ?? 0) * 100)}% used.${early}`;
-		});
-		const question =
-			actions.length === 1
-				? `Spend a saved ${providerLabel} rate-limit reset?\n${lines[0]}`
-				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
-		try {
-			const choice = await runner.getUIContext().select(question, [
-				{
-					label: "Yes",
-					description: `Redeem now and remember yes for future eligible ${providerLabel} resets.`,
-				},
-				{
-					label: "No",
-					description: `Do not auto-redeem saved ${providerLabel} resets.`,
-				},
-			]);
-			if (choice === "Yes") {
-				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "yes");
-				else cfgCodexResetsAutoRedeem.set(this.settings, "yes");
-				return true;
-			}
-			if (choice === "No") {
-				if (provider === "anthropic") cfgClaudeResetsAutoRedeem.set(this.settings, "no");
-				else cfgCodexResetsAutoRedeem.set(this.settings, "no");
-			}
-		} catch (error) {
-			logger.warn(`${source} prompt failed`, { error: String(error) });
 		}
-		return false;
+		return approved;
+	}
+
+	/**
+	 * Split a plan's actions by their effective per-credential answer, spend
+	 * every `"yes"` action without a prompt, and ask about every `"unset"`
+	 * one. A `"no"` action is dropped: neither spent nor prompted.
+	 */
+	async #redeemApprovedActions(
+		provider: "openai-codex" | "anthropic",
+		plan: CodexResetPlan | ClaudeResetPlan,
+		autoRedeem: ResetAutoRedeemMode,
+		byCredential: Readonly<Record<string, string>>,
+		coordinator: CodexAutoRedeemCoordinator,
+	): Promise<number> {
+		if (plan.actions.length === 0) return 0;
+		const yesActions = plan.actions.filter(
+			action => effectiveAutoRedeem(autoRedeem, byCredential, action.target.credentialId) === "yes",
+		);
+		const unsetActions = plan.actions.filter(
+			action => effectiveAutoRedeem(autoRedeem, byCredential, action.target.credentialId) === "unset",
+		);
+		const approved = [...yesActions, ...(await this.#confirmAutoRedeem(provider, unsetActions, coordinator))];
+		if (approved.length === 0) return 0;
+		return this.#executeResetActions(provider, approved, coordinator);
 	}
 
 	#planCodexResets(
@@ -11343,6 +11377,7 @@ export class AgentSession implements SettingsScope {
 		activeBlockUnblockAtMs?: number,
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
+		const byCredential = cfgCodexResetsAutoRedeemByCredential.get(this.settings);
 		const model = this.model;
 		const plan = planCodexResetRedemptions({
 			nowMs: Date.now(),
@@ -11350,7 +11385,7 @@ export class AgentSession implements SettingsScope {
 			provider: model?.provider ?? "",
 			modelId: model?.id ?? "",
 			settings: {
-				enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
+				enabled: anyAutoRedeemEnabled(cfg.autoRedeem, byCredential),
 				minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 				keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 				salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
@@ -11376,6 +11411,7 @@ export class AgentSession implements SettingsScope {
 		activeBlockUnblockAtMs?: number,
 	): ClaudeResetPlan {
 		const cfg = cfgClaudeResets.get(this.settings);
+		const byCredential = cfgClaudeResetsAutoRedeemByCredential.get(this.settings);
 		const model = this.model;
 		const plan = planClaudeResetRedemptions({
 			nowMs: Date.now(),
@@ -11383,7 +11419,7 @@ export class AgentSession implements SettingsScope {
 			provider: model?.provider ?? "",
 			modelId: model?.provider === "anthropic" ? model.id : "",
 			settings: {
-				enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
+				enabled: anyAutoRedeemEnabled(cfg.autoRedeem, byCredential),
 				minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 				keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 				salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
@@ -11505,7 +11541,10 @@ export class AgentSession implements SettingsScope {
 		const provider = this.model?.provider;
 		if (provider !== "anthropic" && provider !== "openai-codex") return false;
 		const cfg = (provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(this.settings);
-		if (!shouldEvaluateCodexAutoRedeem(cfg.autoRedeem)) return false;
+		const byCredential = (
+			provider === "anthropic" ? cfgClaudeResetsAutoRedeemByCredential : cfgCodexResetsAutoRedeemByCredential
+		).get(this.settings);
+		if (!anyAutoRedeemEnabled(cfg.autoRedeem, byCredential)) return false;
 		const coordinator = this.#resetCoordinator;
 		const authStorage = this.#modelRegistry.authStorage;
 		const identity = authStorage.oauth.identity(provider, this.sessionId);
@@ -11529,14 +11568,9 @@ export class AgentSession implements SettingsScope {
 							coordinator,
 							activeBlockUnblockAtMs,
 						);
-			if (plan.actions.length === 0) return false;
-			if (
-				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
-				!(await this.#confirmAutoRedeem(provider, plan.actions, coordinator))
-			) {
-				return false;
-			}
-			return (await this.#executeResetActions(provider, plan.actions, coordinator)) > 0;
+			return (
+				(await this.#redeemApprovedActions(provider, plan, cfg.autoRedeem, byCredential, coordinator)) > 0
+			);
 		})()
 			.catch(error => {
 				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });
@@ -11556,12 +11590,14 @@ export class AgentSession implements SettingsScope {
 		const coordinator = this.#resetCoordinator;
 		const codexCfg = cfgCodexResets.get(this.settings);
 		const claudeCfg = cfgClaudeResets.get(this.settings);
+		const codexByCredential = cfgCodexResetsAutoRedeemByCredential.get(this.settings);
+		const claudeByCredential = cfgClaudeResetsAutoRedeemByCredential.get(this.settings);
 		const codexEnabled =
-			shouldEvaluateCodexAutoRedeem(codexCfg.autoRedeem) &&
+			anyAutoRedeemEnabled(codexCfg.autoRedeem, codexByCredential) &&
 			codexCfg.salvageHorizonHours > 0 &&
 			reports.some(report => report.provider === "openai-codex");
 		const claudeEnabled =
-			shouldEvaluateCodexAutoRedeem(claudeCfg.autoRedeem) &&
+			anyAutoRedeemEnabled(claudeCfg.autoRedeem, claudeByCredential) &&
 			claudeCfg.salvageHorizonHours > 0 &&
 			reports.some(report => report.provider === "anthropic");
 		if (!codexEnabled && !claudeEnabled) return;
@@ -11577,13 +11613,13 @@ export class AgentSession implements SettingsScope {
 					const effectiveReports = overlayLiveResetCredits(reports, statuses);
 					const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
 					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
-					if (
-						plan.actions.length > 0 &&
-						(!shouldPromptCodexAutoRedeem(codexCfg.autoRedeem) ||
-							(await this.#confirmAutoRedeem("openai-codex", plan.actions, coordinator)))
-					) {
-						await this.#executeResetActions("openai-codex", plan.actions, coordinator);
-					}
+					await this.#redeemApprovedActions(
+						"openai-codex",
+						plan,
+						codexCfg.autoRedeem,
+						codexByCredential,
+						coordinator,
+					);
 				} catch (error) {
 					logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 				}
@@ -11592,13 +11628,13 @@ export class AgentSession implements SettingsScope {
 				try {
 					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "anthropic");
 					const plan = this.#planClaudeResets("sweep", reports, statuses, coordinator);
-					if (
-						plan.actions.length > 0 &&
-						(!shouldPromptCodexAutoRedeem(claudeCfg.autoRedeem) ||
-							(await this.#confirmAutoRedeem("anthropic", plan.actions, coordinator)))
-					) {
-						await this.#executeResetActions("anthropic", plan.actions, coordinator);
-					}
+					await this.#redeemApprovedActions(
+						"anthropic",
+						plan,
+						claudeCfg.autoRedeem,
+						claudeByCredential,
+						coordinator,
+					);
 				} catch (error) {
 					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
 				}

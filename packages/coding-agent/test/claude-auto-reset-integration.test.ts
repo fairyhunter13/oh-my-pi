@@ -15,7 +15,29 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgClaudeResetsAutoRedeem, cfgClaudeResetsAutoRedeemByCredential } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+/** Minimal `ExtensionRunner` seam `#confirmAutoRedeem` reads: a UI that always answers the same way. */
+interface FakeAutoRedeemExtensionRunner {
+	hasUI(): boolean;
+	getUIContext(): {
+		select: (question: string, options: { label: string; description: string }[]) => Promise<string | undefined>;
+	};
+}
+
+/** A UI that picks the "Yes for <label>" option, whatever the label is. */
+function alwaysYesRunner(picks: string[]): FakeAutoRedeemExtensionRunner {
+	return {
+		hasUI: () => true,
+		getUIContext: () => ({
+			select: async (_question, options) => {
+				const pick = options.find(option => option.label.startsWith("Yes for"))?.label;
+				if (pick) picks.push(pick);
+				return pick;
+			},
+		}),
+	};
+}
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -117,6 +139,8 @@ describe("Claude saved-reset trigger integration", () => {
 		status: ResetCreditAccountStatus;
 		streamErrorFirst?: boolean;
 		autoRedeem?: "unset" | "yes" | "no";
+		autoRedeemByCredential?: Record<string, string>;
+		extensionRunner?: FakeAutoRedeemExtensionRunner;
 	}): { session: AgentSession; coordinator: CodexAutoRedeemCoordinator; targets: ResetCreditTarget[] } {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
@@ -164,6 +188,7 @@ describe("Claude saved-reset trigger integration", () => {
 			"retry.maxRetries": 1,
 			"codexResets.autoRedeem": "no",
 			"claudeResets.autoRedeem": options.autoRedeem ?? "yes",
+			"claudeResets.autoRedeemByCredential": options.autoRedeemByCredential ?? {},
 			"claudeResets.salvageHorizonHours": 12,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
@@ -176,6 +201,7 @@ describe("Claude saved-reset trigger integration", () => {
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
+			extensionRunner: options.extensionRunner as never,
 		});
 		sessions.push(session);
 		return { session, coordinator, targets };
@@ -245,6 +271,58 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(0);
 		expect(coordinator.attemptedKeys.size).toBe(0);
+		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
+	});
+
+	it("a per-credential \"no\" drops the action, even under an unset provider mode, with no prompt", async () => {
+		const { session, coordinator, targets } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+			autoRedeem: "unset",
+			autoRedeemByCredential: { [String(CREDENTIAL_ID)]: "no" },
+		});
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(targets).toHaveLength(0);
+		expect(cfgClaudeResetsAutoRedeemByCredential.get(session.settings)).toEqual({ [String(CREDENTIAL_ID)]: "no" });
+	});
+
+	it("a per-credential \"yes\" executes with no prompt, even under provider mode \"no\"", async () => {
+		const { session, coordinator, targets } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+			autoRedeem: "no",
+			autoRedeemByCredential: { [String(CREDENTIAL_ID)]: "yes" },
+		});
+
+		await session.fetchUsageReports();
+		expect(coordinator.sweepPromise).toBeDefined();
+		await coordinator.sweepPromise;
+		expect(targets).toHaveLength(1);
+		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("no");
+	});
+
+	it('answering "Yes for <label>" writes that credential only and never the provider-level mode', async () => {
+		const picks: string[] = [];
+		const { session, coordinator, targets } = buildSession({
+			report: claudeReport(0.5),
+			status: claudeStatus(false),
+			autoRedeem: "unset",
+			autoRedeemByCredential: { "5": "yes", "6": "no" },
+			extensionRunner: alwaysYesRunner(picks),
+		});
+
+		await session.fetchUsageReports();
+		expect(coordinator.sweepPromise).toBeDefined();
+		await coordinator.sweepPromise;
+		expect(targets).toHaveLength(1);
+		expect(picks).toHaveLength(1);
+		expect(cfgClaudeResetsAutoRedeemByCredential.get(session.settings)).toEqual({
+			"5": "yes",
+			"6": "no",
+			[String(CREDENTIAL_ID)]: "yes",
+		});
 		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
 	});
 });

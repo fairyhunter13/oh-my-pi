@@ -21,8 +21,10 @@ import { describe, expect, it } from "bun:test";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	anyAutoRedeemEnabled,
 	blockedAttemptKey,
 	type CodexResetPlanInput,
+	effectiveAutoRedeem,
 	isTerminalRedeemOutcome,
 	planCodexResetRedemptions,
 	SALVAGE_MIN_USED_FRACTION,
@@ -754,5 +756,27 @@ describe("codexResets policy plumbing", () => {
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {
 		expect(cfgCodexResetsAutoRedeem.get(Settings.isolated({ "codexResets.autoRedeem": true }))).toBe("yes");
 		expect(cfgCodexResetsAutoRedeem.get(Settings.isolated({ "codexResets.autoRedeem": false }))).toBe("no");
+	});
+
+	it("effectiveAutoRedeem: a per-credential yes/no wins over the provider mode", () => {
+		expect(effectiveAutoRedeem("unset", { "5": "yes" }, 5)).toBe("yes");
+		expect(effectiveAutoRedeem("unset", { "5": "no" }, 5)).toBe("no");
+		expect(effectiveAutoRedeem("yes", { "5": "no" }, 5)).toBe("no");
+		// No entry for this id: falls back to the provider mode.
+		expect(effectiveAutoRedeem("unset", { "6": "yes" }, 5)).toBe("unset");
+		// credentialId undefined: falls back to the provider mode.
+		expect(effectiveAutoRedeem("yes", { "5": "no" }, undefined)).toBe("yes");
+		// A garbage value reads as absent.
+		expect(effectiveAutoRedeem("unset", { "5": "maybe" }, 5)).toBe("unset");
+		expect(effectiveAutoRedeem("unset", { "5": "" }, 5)).toBe("unset");
+	});
+
+	it("anyAutoRedeemEnabled: the provider mode, or a yes override, enables evaluation", () => {
+		expect(anyAutoRedeemEnabled("unset", {})).toBe(true);
+		expect(anyAutoRedeemEnabled("yes", {})).toBe(true);
+		expect(anyAutoRedeemEnabled("no", {})).toBe(false);
+		expect(anyAutoRedeemEnabled("no", { "5": "no" })).toBe(false);
+		expect(anyAutoRedeemEnabled("no", { "5": "yes" })).toBe(true);
+		expect(anyAutoRedeemEnabled("no", { "5": "maybe" })).toBe(false);
 	});
 });
