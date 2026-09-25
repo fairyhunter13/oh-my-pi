@@ -91,6 +91,7 @@ import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { createAgentsHubDeps } from "../agents-hub-deps";
+import type { AgentBindingChange } from "../../extensibility/extensions/types";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
@@ -569,6 +570,18 @@ export class SelectorController {
 		const activeModel = this.ctx.session.model;
 		const activeModelPattern = activeModel ? `${activeModel.provider}/${activeModel.id}` : undefined;
 		const defaultModelPattern = this.ctx.settings.getModelRole("default");
+		// The bindings provider needs an `ExtensionContext` per call (§createContext's
+		// own note: it materializes `cwd`/`hasUI` per invocation, so a context built
+		// once for the hub's lifetime would go stale across a `SessionManager.moveTo()`).
+		const runner = this.ctx.session.extensionRunner;
+		const provider = runner?.getAgentBindings();
+		const bindings =
+			provider && runner
+				? {
+						describe: (agent: string) => provider.describe(agent, runner.createContext()),
+						save: (change: AgentBindingChange) => provider.save(change, runner.createContext()),
+					}
+				: undefined;
 		let closed = false;
 		const done = () => {
 			if (closed) return;
@@ -604,6 +617,7 @@ export class SelectorController {
 						return result;
 					},
 				},
+				bindings,
 			),
 			{ onCancel: () => done() },
 		);

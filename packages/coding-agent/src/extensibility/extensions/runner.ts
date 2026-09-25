@@ -9,7 +9,13 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, CredentialRemovedEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type {
+	CredentialDisabledEvent,
+	CredentialRemovedEvent,
+	ImageContent,
+	Model,
+	ProviderResponseMetadata,
+} from "@oh-my-pi/pi-ai";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -35,6 +41,7 @@ import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
+	AgentBindingsProvider,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -1252,6 +1259,17 @@ export class ExtensionRunner {
 			const command = this.extensions[index]?.commands.get(name);
 			if (command) {
 				return command;
+			}
+		}
+		return undefined;
+	}
+
+	/** Last-extension-wins, same order as {@link getCommand}. */
+	getAgentBindings(): AgentBindingsProvider | undefined {
+		for (let index = this.extensions.length - 1; index >= 0; index -= 1) {
+			const provider = this.extensions[index]?.agentBindings;
+			if (provider) {
+				return provider;
 			}
 		}
 		return undefined;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentsHubDeps.describeBinding`/`saveBinding`: when a host wires them up, `/agents` shows each agent's bound credential and edits go through the host's mapping instead of `setOverrides`/`setDisabledAgents`.
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

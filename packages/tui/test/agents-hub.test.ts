@@ -7,9 +7,19 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { AgentsHubComponent, type AgentsHubDeps, type HubAgent } from "../src/overlays/agents-hub";
+import {
+	AgentsHubComponent,
+	type AgentsHubDeps,
+	type HubAgent,
+	type HubAgentBindingChange,
+} from "../src/overlays/agents-hub";
 import { initTheme } from "../src/theme";
 import type { TUI } from "../src/index";
+
+/** Drains the microtask queue: a `saveBinding` result flows through `.then(async …)` then `#reload()`'s own `await`. */
+async function flushAsync(): Promise<void> {
+	await new Promise<void>(resolve => setImmediate(resolve));
+}
 
 const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 interface TestSettings {
@@ -423,5 +433,78 @@ describe("AgentsHub edit, delete, copy, and credential hand-off", () => {
 		expect(strip()).toContain("map with /agent-profile");
 		hub.handleInput("\r");
 		expect(calls).toEqual(["dev"]);
+	});
+});
+
+describe("AgentsHub agent-profile bindings provider", () => {
+	test("a model pattern edit calls saveBinding once and never calls setOverrides; the render shows its notice", async () => {
+		const settings = createSettings();
+		const saveBindingCalls: HubAgentBindingChange[] = [];
+		const setOverridesCalls: Array<{ property: string; overrides: Record<string, string> }> = [];
+		const { hub, strip, type } = await createHub(settings, {
+			saveBinding: async change => {
+				saveBindingCalls.push(change);
+				return { ok: true, notice: "saved" };
+			},
+			setOverrides: (property, overrides) => {
+				setOverridesCalls.push({ property, overrides });
+			},
+		});
+		hub.handleInput("\r"); // agent strip
+		hub.handleInput("\r"); // model value strip: pick model… (index 0)
+		hub.handleInput("\x1b[C"); // -> pattern…
+		hub.handleInput("\r"); // pattern input
+		type("anthropic/claude-sonnet-4-5");
+		hub.handleInput("\r"); // submit
+		await flushAsync();
+		expect(saveBindingCalls).toEqual([{ agent: "dev", property: "model", value: "anthropic/claude-sonnet-4-5" }]);
+		expect(setOverridesCalls).toEqual([]);
+		expect(strip()).toContain("saved");
+	});
+
+	test("saveBinding returning undefined (no mapping applies) falls back to setOverrides", async () => {
+		const settings = createSettings();
+		const saveBindingCalls: HubAgentBindingChange[] = [];
+		const { hub, type } = await createHub(settings, {
+			saveBinding: async change => {
+				saveBindingCalls.push(change);
+				return undefined;
+			},
+		});
+		hub.handleInput("\r"); // agent strip
+		hub.handleInput("\r"); // model value strip
+		hub.handleInput("\x1b[C"); // -> pattern…
+		hub.handleInput("\r"); // pattern input
+		type("anthropic/claude-sonnet-4-5");
+		hub.handleInput("\r"); // submit
+		await flushAsync();
+		expect(saveBindingCalls).toEqual([{ agent: "dev", property: "model", value: "anthropic/claude-sonnet-4-5" }]);
+		expect(settings.get("task.agentModelOverrides")).toEqual({ dev: "anthropic/claude-sonnet-4-5" });
+	});
+
+	test("an agent with a binding shows the credential line in the detail pane and a credential chip in the model strip", async () => {
+		const settings = createSettings();
+		const { hub, strip } = await createHub(settings, {
+			saveBinding: async () => undefined,
+			loadAgents: async () => [
+				{
+					name: "dev",
+					description: "Development agent",
+					systemPrompt: "You are dev.",
+					source: "project",
+					filePath: "/tmp/agents-hub-test/.omp/agents/dev.md",
+					origin: "project-omp",
+					editable: true,
+					disabled: false,
+					binding: "split · anthropic: work #5",
+				},
+			],
+		});
+		expect(strip()).toContain("credential: split · anthropic: work #5");
+		hub.handleInput("\r"); // agent strip
+		hub.handleInput("\r"); // model value strip
+		const rendered = strip();
+		expect(rendered).toContain("pick model…");
+		expect(rendered).toContain("credential: split · anthropic: work #5 · map…");
 	});
 });

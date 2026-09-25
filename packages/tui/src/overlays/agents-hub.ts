@@ -75,6 +75,8 @@ export interface HubAgent {
 	prewalkOverride?: string;
 	/** `task.agentAdvisor[name]`: "on", "off", or a model pattern. */
 	advisorOverride?: string;
+	/** One line describing what the current agent-profile mapping binds for this agent, from `AgentsHubDeps.describeBinding`. */
+	binding?: string;
 	/** Directory this agent's file lives in, resolved against the known agent roots. */
 	origin: HubAgentOrigin;
 	/** Whether the hub may rewrite or delete this agent's file (project `.omp` or user scope). */
@@ -104,6 +106,14 @@ type ListRow = { kind: "agent"; agent: HubAgent } | { kind: "new" };
 
 /** The per-agent knob a strip or the model browser is editing. */
 type PropertyKind = "model" | "prewalk" | "advisor";
+
+/**
+ * Structurally identical to coding-agent's `AgentBindingChange`; pi-tui cannot
+ * import coding-agent, so `AgentsHubDeps.saveBinding` declares its own copy.
+ */
+export type HubAgentBindingChange =
+	| { agent: string; property: "model" | "prewalk" | "advisor"; value?: string }
+	| { agent: string; property: "disabled"; disabled: boolean };
 
 type StripChip = HubStripChip<
 	| { kind: "toggle" }
@@ -182,6 +192,14 @@ export interface AgentsHubDeps {
 	hasAgentProfileCommand: () => boolean;
 	/** Run `/agent-profile set <name>` the way a typed slash command runs. */
 	runAgentProfileSet: (agentName: string) => Promise<void>;
+	/** One line describing what the current agent-profile mapping binds for `name`, from the extension bindings provider. */
+	describeBinding?: (name: string) => string | undefined;
+	/**
+	 * Apply one change to the current agent-profile mapping through the extension
+	 * bindings provider. `undefined` means no mapping applies; the hub then falls
+	 * back to `setOverrides`/`setDisabledAgents`.
+	 */
+	saveBinding?: (change: HubAgentBindingChange) => Promise<{ ok: boolean; notice: string } | undefined>;
 }
 
 export interface AgentsHubCallbacks {
@@ -413,13 +431,30 @@ export class AgentsHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#toggleAgent(agent: HubAgent): void {
-		agent.disabled = !agent.disabled;
-		const disabled = this.#allAgents
+		const disabled = !agent.disabled;
+		if (this.#deps.saveBinding) {
+			void this.#deps.saveBinding({ agent: agent.name, property: "disabled", disabled }).then(async result => {
+				if (result) {
+					this.#notice = result.notice;
+					await this.#reload();
+					return;
+				}
+				this.#applyToggle(agent, disabled);
+			});
+			return;
+		}
+		this.#applyToggle(agent, disabled);
+	}
+
+	/** The native path: write `task.disabledAgents` directly. Used with no bindings provider, or when `save` returns `undefined` (no mapping applies). */
+	#applyToggle(agent: HubAgent, disabled: boolean): void {
+		agent.disabled = disabled;
+		const names = this.#allAgents
 			.filter(entry => entry.disabled)
 			.map(entry => entry.name)
 			.sort((a, b) => a.localeCompare(b));
-		this.#deps.setDisabledAgents(disabled);
-		this.#notice = `${agent.name} ${agent.disabled ? "disabled" : "enabled"}`;
+		this.#deps.setDisabledAgents(names);
+		this.#notice = `${agent.name} ${disabled ? "disabled" : "enabled"}`;
 		this.#tui.requestRender();
 	}
 
@@ -445,6 +480,22 @@ export class AgentsHubComponent implements Component {
 
 	#setOverride(agent: HubAgent, property: PropertyKind, value: string | undefined): void {
 		const trimmed = value?.trim() || undefined;
+		if (this.#deps.saveBinding) {
+			void this.#deps.saveBinding({ agent: agent.name, property, value: trimmed }).then(async result => {
+				if (result) {
+					this.#notice = result.notice;
+					await this.#reload();
+					return;
+				}
+				this.#applyOverride(agent, property, trimmed);
+			});
+			return;
+		}
+		this.#applyOverride(agent, property, trimmed);
+	}
+
+	/** The native path: write the per-property record directly. Used with no bindings provider, or when `save` returns `undefined` (no mapping applies). */
+	#applyOverride(agent: HubAgent, property: PropertyKind, trimmed: string | undefined): void {
 		switch (property) {
 			case "model":
 				agent.overrideModel = trimmed;
@@ -507,7 +558,8 @@ export class AgentsHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#propertySummary(agent: HubAgent, property: PropertyKind): string {
-		if (property === "model" && this.#deps.hasAgentProfileCommand()) return "set by /agent-profile";
+		if (property === "model" && this.#deps.hasAgentProfileCommand() && !this.#deps.saveBinding)
+			return "set by /agent-profile";
 		switch (property) {
 			case "model":
 				return agent.overrideModel ?? "auto";
@@ -551,7 +603,7 @@ export class AgentsHubComponent implements Component {
 
 	/** Level-2 strip: value choices for one property of `agent`. */
 	#openPropertyStrip(agent: HubAgent, property: PropertyKind): void {
-		if (property === "model" && this.#deps.hasAgentProfileCommand()) {
+		if (property === "model" && this.#deps.hasAgentProfileCommand() && !this.#deps.saveBinding) {
 			this.#strip = {
 				kind: "chips",
 				agent,
@@ -588,6 +640,10 @@ export class AgentsHubComponent implements Component {
 					styled: theme.fg("warning", "clear override"),
 					action: { kind: "set", property, value: undefined },
 				});
+			}
+			if (this.#deps.saveBinding) {
+				const label = `credential: ${agent.binding ?? "?"} · map…`;
+				chips.push({ label, styled: theme.fg("accent", label), action: { kind: "mapCredential" } });
 			}
 		} else {
 			chips.push({
@@ -1370,7 +1426,7 @@ export class AgentsHubComponent implements Component {
 		lines.push("");
 		this.#listRowStart = lines.length;
 
-		const detailRows = 4;
+		const detailRows = 5;
 		const visibleRows = Math.max(3, rows - lines.length - detailRows);
 		if (this.#rowIndex < this.#listScroll) this.#listScroll = this.#rowIndex;
 		else if (this.#rowIndex >= this.#listScroll + visibleRows) this.#listScroll = this.#rowIndex - visibleRows + 1;
@@ -1437,6 +1493,11 @@ export class AgentsHubComponent implements Component {
 			const resolved = this.#deps.resolvePatterns(patterns);
 			const modelLine = `${theme.fg("muted", "model:")} ${patterns.length > 0 ? replaceTabs(patterns.join(",")) : theme.fg("dim", "(session model)")}${resolved ? ` ${theme.fg("dim", "→")} ${theme.fg("success", resolved)}` : ""}`;
 			lines.push(truncateToWidth(` ${modelLine}`, width));
+			lines.push(
+				agent.binding
+					? truncateToWidth(` ${theme.fg("muted", "credential:")} ${theme.fg("success", agent.binding)}`, width)
+					: "",
+			);
 			const prewalk = this.#deps.effectivePrewalkPattern(agent);
 			const advisor = this.#deps.effectiveAdvisorPattern(agent);
 			const flagLine = [
@@ -1449,6 +1510,7 @@ export class AgentsHubComponent implements Component {
 			lines.push(truncateToWidth(` ${flagLine}`, width));
 		} else {
 			lines.push(theme.fg("dim", " Select an agent to inspect"));
+			lines.push("");
 			lines.push("");
 			lines.push("");
 		}

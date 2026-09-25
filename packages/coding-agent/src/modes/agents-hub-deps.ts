@@ -16,6 +16,7 @@ import {
 	resolveModelOverride,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import type { AgentBindingChange } from "../extensibility/extensions/types";
 import agentCreationArchitectPrompt from "../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../sdk";
@@ -158,6 +159,11 @@ export function createAgentsHubDeps(
 		/** Run `text` (e.g. `"/agent-profile set scout"`) the way a typed slash command runs. */
 		runCommand: (text: string) => Promise<boolean>;
 	},
+	/** The extension-registered agent-bindings provider, already bound to an `ExtensionContext`. `undefined` when no extension registered one. */
+	bindings?: {
+		describe: (agent: string) => string | undefined;
+		save: (change: AgentBindingChange) => Promise<{ ok: boolean; notice: string } | undefined>;
+	},
 ): AgentsHubDeps {
 	return {
 		browserSource: createModelBrowserSource(settings),
@@ -187,6 +193,12 @@ export function createAgentsHubDeps(
 						const frontmatter = await readAgentFrontmatter(agent.filePath);
 						if (frontmatter["generated-by"] === "ccw") editable = false;
 					}
+					let binding: string | undefined;
+					try {
+						binding = bindings?.describe(agent.name);
+					} catch {
+						binding = undefined;
+					}
 					return {
 						...agent,
 						origin,
@@ -195,6 +207,7 @@ export function createAgentsHubDeps(
 						overrideModel: overrideModel || undefined,
 						prewalkOverride: prewalkOverrides[agent.name]?.trim() || undefined,
 						advisorOverride: advisorOverrides[agent.name]?.trim() || undefined,
+						binding,
 					};
 				}),
 			);
@@ -330,5 +343,7 @@ export function createAgentsHubDeps(
 		runAgentProfileSet: async agentName => {
 			await commandRunner?.runCommand(`/agent-profile set ${agentName}`);
 		},
+		describeBinding: bindings ? name => bindings.describe(name) : undefined,
+		saveBinding: bindings ? change => bindings.save(change) : undefined,
 	};
 }

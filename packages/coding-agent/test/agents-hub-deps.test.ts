@@ -39,10 +39,21 @@ describe("createAgentsHubDeps", () => {
 		await removeWithRetries(projectDir);
 	});
 
-	function makeDeps(commandRunner?: {
-		hasCommand: (name: string) => boolean;
-		runCommand: (text: string) => Promise<boolean>;
-	}) {
+	function makeDeps(
+		commandRunner?: {
+			hasCommand: (name: string) => boolean;
+			runCommand: (text: string) => Promise<boolean>;
+		},
+		bindings?: {
+			describe: (agent: string) => string | undefined;
+			save: (change: {
+				agent: string;
+				property: "model" | "prewalk" | "advisor" | "disabled";
+				value?: string;
+				disabled?: boolean;
+			}) => Promise<{ ok: boolean; notice: string } | undefined>;
+		},
+	) {
 		return createAgentsHubDeps(
 			projectDir,
 			Settings.isolated({}),
@@ -51,6 +62,7 @@ describe("createAgentsHubDeps", () => {
 			undefined,
 			undefined,
 			commandRunner,
+			bindings,
 		);
 	}
 
@@ -190,6 +202,29 @@ describe("createAgentsHubDeps", () => {
 		const alpha = agents.find(agent => agent.name === "alpha");
 		expect(alpha?.origin).toBe("project-omp");
 		expect(alpha?.editable).toBe(true);
+	});
+
+	test("loadAgents fills binding from the bindings provider's describe", async () => {
+		const agentDir = path.join(projectDir, ".omp", "agents");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.writeFile(path.join(agentDir, "alpha.md"), AGENT_MD);
+		const deps = makeDeps(undefined, {
+			describe: name => (name === "alpha" ? "tiered · pool · assign.profiles.tiered" : undefined),
+			save: async () => undefined,
+		});
+		const agents = await deps.loadAgents();
+		const alpha = agents.find(agent => agent.name === "alpha");
+		expect(alpha?.binding).toBe("tiered · pool · assign.profiles.tiered");
+	});
+
+	test("loadAgents leaves binding undefined with no bindings provider", async () => {
+		const agentDir = path.join(projectDir, ".omp", "agents");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.writeFile(path.join(agentDir, "alpha.md"), AGENT_MD);
+		const deps = makeDeps();
+		const agents = await deps.loadAgents();
+		const alpha = agents.find(agent => agent.name === "alpha");
+		expect(alpha?.binding).toBeUndefined();
 	});
 
 	test("J-4: loadAgents marks a ccw-generated user agent read-only, and a hand-authored one stays editable", async () => {

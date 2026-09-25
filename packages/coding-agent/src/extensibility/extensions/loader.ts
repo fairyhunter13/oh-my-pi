@@ -40,6 +40,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
+	AgentBindingsProvider,
 	AssistantThinkingRenderer,
 	Extension,
 	ExtensionAPI,
@@ -240,6 +241,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		},
 	): void {
 		this.extension.commands.set(name, { name, ...options });
+	}
+
+	registerAgentBindings(provider: AgentBindingsProvider): void {
+		this.extension.agentBindings = provider;
 	}
 
 	setLabel(label: string): void {

@@ -1429,6 +1429,15 @@ export interface ExtensionAPI {
 		},
 	): void;
 
+	/**
+	 * Register a provider that backs the agents hub's edit and credential-display
+	 * surface. The hub calls `describe` to show what the current agent-profile
+	 * mapping binds, and `save` to apply an edit to that mapping instead of the
+	 * hub's own generated-file write. `save` returning `undefined` means no mapping
+	 * applies, and the hub falls back to its native write.
+	 */
+	registerAgentBindings(provider: AgentBindingsProvider): void;
+
 	/** Register a keyboard shortcut. */
 	registerShortcut(
 		shortcut: KeyId,
@@ -1810,6 +1819,27 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 	setServiceTier: SetServiceTierHandler;
 }
 
+// ============================================================================
+// Agent Bindings (agents hub ↔ agent-profile mapping)
+// ============================================================================
+
+/** One edit the agents hub applies to the current agent-profile mapping. */
+export type AgentBindingChange =
+	| { agent: string; property: "model" | "prewalk" | "advisor"; value?: string }
+	| { agent: string; property: "disabled"; disabled: boolean };
+
+/**
+ * Backs the agents hub's edit and credential-display surface. `save` returning
+ * `undefined` means no mapping applies, so the hub falls back to its own
+ * generated-file write instead of treating the change as handled.
+ */
+export interface AgentBindingsProvider {
+	/** One line describing what the current mapping binds for `agent`, or `undefined` to show nothing. */
+	describe(agent: string, ctx: ExtensionContext): string | undefined;
+	/** Apply `change` to the current mapping. `undefined` means no mapping applies. */
+	save(change: AgentBindingChange, ctx: ExtensionContext): Promise<{ ok: boolean; notice: string } | undefined>;
+}
+
 /** Loaded extension with all registered items. */
 export interface Extension {
 	path: string;
@@ -1826,6 +1856,7 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	agentBindings?: AgentBindingsProvider;
 }
 
 /**
