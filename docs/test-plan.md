@@ -17,7 +17,8 @@ D-nn names the rule or concept the case defends; the D table lists them.
 
 Under test: the commits on branch `ccw` over the upstream release tag. They cover the credential
 catalog and pins, the selector grammar and pickers, the agents hub, MCP 2026-07-28, the shell
-snapshot and the stats credential filter, plus the stats sync order fix.
+snapshot and the stats credential filter, plus two stats fixes: the sync order and the disk-roots
+memo.
 
 Named exclusion: upstream behavior that these commits do not touch. Upstream's own suite covers it.
 
@@ -206,6 +207,16 @@ Scenario: S-16 the auth schema moves to 9 and never down
   And the system holds that a newer version is never downgraded
 ```
 
+### S-17: the session list reads the current sessions directory
+
+```gherkin
+Scenario: S-17 the session list reads the current sessions directory
+  Given a session list read from one sessions directory less than 5 s ago
+  When the agent directory changes and the list is read again
+  Then the rows come from the new directory, and an unsynced session there is listed
+  And the system holds that no row from the old directory is returned
+```
+
 ## Cases
 
 | ID | Title | S-nn | D-nn covered | Status | Test node ID | Risk | Tier |
@@ -247,7 +258,9 @@ Scenario: S-16 the auth schema moves to 9 and never down
 | T-35 | provider stats | S-14 | D-STATS | done | `packages/stats/test/provider-stats.test.ts` | 12 | E1 |
 | T-36 | fork dedup | S-15 | D-STATS | done | `packages/stats/test/fork-dedup.test.ts` | 12 | E1 |
 | T-37 | a newer schema version is never downgraded | S-16 | D-C1 | done | `packages/ai/test/auth-storage-email-dedupe.test.ts` | 12 | E1 |
-| T-38 | a v8 auth db migrates to v9 | S-16 | D-C1 | planned |  | 12 | E1 |
+| T-38 | a v8 auth db migrates to v9 | S-16 | D-C1 | done | `packages/ai/test/auth-storage-schema-v9.test.ts` | 12 | E1 |
+| T-39 | an unsynced on-disk session is listed from the current sessions directory | S-17 | D-STATS | done | `packages/stats/test/trace-builder.test.ts` | 12 | E1 |
+| T-40 | ctrl+k hands the mapping to /agent-profile set (rule set §6 row 12) | S-11 | D-H | done | `packages/tui/test/agents-hub.test.ts` | 12 | E1 |
 
 The node ID is the test file path, because bun has no collect-only listing.
 
