@@ -31,10 +31,10 @@ describe("resolveSessionCredentialArg", () => {
 	it("rejects a malformed value", async () => {
 		const storage = await makeStorage();
 		expect(resolveSessionCredentialArg(storage, "anthropic")).toBe(
-			'"anthropic" is not "<provider>/<credential id>".',
+			"Name a credential as <provider>/<id|active|#id|label|email>.",
 		);
-		expect(resolveSessionCredentialArg(storage, "anthropic/5abc")).toBe(
-			'"anthropic/5abc" is not "<provider>/<credential id>".',
+		expect(resolveSessionCredentialArg(storage, "anthropic/5abc")).toContain(
+			'No anthropic credential matches "5abc".',
 		);
 	});
 
@@ -52,8 +52,7 @@ describe("resolveSessionCredentialArg", () => {
 		await addOAuth(storage, "anthropic", "a@example.test");
 		const resolved = resolveSessionCredentialArg(storage, "anthropic/999999");
 		expect(typeof resolved).toBe("string");
-		expect(resolved as string).toContain("matches no stored row");
-		expect(resolved as string).toContain("Pick a credential with --credential <provider>/<id>:");
+		expect(resolved as string).toContain('No anthropic credential matches "999999".');
 		expect(resolved as string).toContain("anthropic/");
 	});
 
@@ -64,7 +63,7 @@ describe("resolveSessionCredentialArg", () => {
 		await storage.credentials.disable(disabledId, "test-disabled");
 		const resolved = resolveSessionCredentialArg(storage, `anthropic/${disabledId}`);
 		expect(typeof resolved).toBe("string");
-		expect(resolved as string).toContain("is disabled");
+		expect(resolved as string).toContain(`No anthropic credential matches "${disabledId}".`);
 		expect(resolved as string).toContain(`anthropic/${enabledId}`);
 	});
 });

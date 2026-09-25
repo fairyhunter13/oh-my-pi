@@ -521,7 +521,9 @@ describe("ACP builtin slash commands", () => {
 
 		const unknown = await executeAcpBuiltinSlashCommand("/usage show anthropic/999", runtime);
 		expect(unknown).toEqual({ consumed: true });
-		expect(output[3]).toBe('No stored credential matches "anthropic/999". List choices with `/usage`.');
+		expect(output[3]).toBe(
+			'No anthropic credential matches "999".\n- Work [anthropic/1] (active)\n- Personal [anthropic/2]',
+		);
 	});
 
 	it("routes saved reset redemption through /usage reset", async () => {

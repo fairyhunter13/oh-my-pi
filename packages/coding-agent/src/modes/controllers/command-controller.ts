@@ -62,7 +62,7 @@ import {
 	formatCodexUsageReportLabel,
 	limitMatchesActiveAccount,
 } from "../../slash-commands/helpers/active-oauth-account";
-import { resolveUsageRowByTarget, usageTargetNotFoundText } from "../../slash-commands/helpers/usage-report";
+import { resolveCredentialTarget } from "../../auth/credential-selector";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { outputMeta } from "../../tools/output-meta";
@@ -645,14 +645,18 @@ export class CommandController {
 		}
 		let row: CredentialSummary;
 		if (target !== undefined) {
-			// F7: `/usage show <provider>/<id|active>` resolves the target the
+			// F7: `/usage show <provider>/<selector>` resolves the target the
 			// same way the ACP text does, and skips the picker entirely.
-			const resolved = resolveUsageRowByTarget(rows, target);
-			if (!resolved) {
-				this.ctx.showWarning(usageTargetNotFoundText(target));
+			const resolved = resolveCredentialTarget(rows, target);
+			if (!resolved.ok) {
+				this.ctx.showWarning(resolved.message);
 				return;
 			}
-			row = resolved;
+			if (resolved.selection.kind === "pool") {
+				this.ctx.showWarning("Choose a stored credential with `/usage show <provider>/<id|#id|label|email>`.");
+				return;
+			}
+			row = resolved.selection.row;
 		} else {
 			const picked = await this.ctx.pickCredential({ verb: "Usage", rows });
 			if (!picked || picked.kind !== "row") return;

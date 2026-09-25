@@ -7,6 +7,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
+import { resolveCredentialTarget } from "../auth/credential-selector";
 import { tokenHelp as commandHelp } from "../cli/command-help";
 import { isAuthenticated, ModelRegistry } from "../config/model-registry";
 import { refreshStoredManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
@@ -56,9 +57,11 @@ interface TokenEntry {
 }
 
 /**
- * `--list` rows: enabled OAuth accounts first, in `oauth.accounts()` order so
- * `--account N` keeps its numbering, then every other stored row (API keys,
- * disabled OAuth) in id order. A store without a credential catalog lists OAuth only.
+ * `--list` rows: enabled OAuth accounts first, in `oauth.accounts()` order, then
+ * every other stored row (API keys, disabled OAuth) in id order. `--credential`
+ * selects a row by its own durable id, `#id`, `active`, label or identity/email —
+ * it never depends on this listing's order. A store without a credential catalog
+ * lists OAuth only.
  */
 function listTokenEntries(
 	authStorage: AuthStorage,
@@ -124,10 +127,10 @@ export default class Token extends Command {
 			description: "Force refresh the OAuth token even if it has not expired",
 			default: false,
 		}),
-		account: Flags.integer({
-			char: "a",
+		credential: Flags.string({
+			char: "c",
 			description:
-				"Select the Nth OAuth account (1-based, as --list numbers it) instead of the round-robin default; API keys are not selectable",
+				"Select one stored credential of this provider instead of the round-robin default: <id|active|#id|label|email>, or <provider>/<selector>. An OAuth row returns its access token, an API-key row its stored key",
 		}),
 		list: Flags.boolean({
 			char: "l",
@@ -142,7 +145,7 @@ export default class Token extends Command {
 		"# Get raw Copilot credential JSON\n  omp token github-copilot --raw",
 		"# Force refresh and get Gemini CLI token\n  omp token google-gemini-cli --force-refresh",
 		"# List Anthropic credentials (OAuth accounts and API keys)\n  omp token anthropic --list",
-		"# Get the 2nd Anthropic OAuth account's token\n  omp token anthropic --account 2",
+		"# Get one Anthropic credential's token by id\n  omp token anthropic --credential anthropic/6",
 	];
 
 	async run(): Promise<void> {
@@ -167,7 +170,7 @@ export default class Token extends Command {
 
 		const authStorage = await discoverAuthStorage();
 		try {
-			if (flags.list || flags.account !== undefined) {
+			if (flags.list || flags.credential !== undefined) {
 				const accounts = authStorage.oauth.accounts(provider);
 				const entries = listTokenEntries(authStorage, provider, accounts);
 				if (flags.list) {
@@ -182,35 +185,40 @@ export default class Token extends Command {
 					}
 					return;
 				}
-				if (accounts.length === 0) {
-					process.stderr.write(`${chalk.red(`No OAuth accounts found for provider "${providerName}".`)}\n`);
-					process.stderr.write("--account selects among OAuth accounts; this provider has none stored.\n");
+				const summaries = authStorage.listCredentials(provider);
+				const resolved = resolveCredentialTarget(summaries, flags.credential!, { provider });
+				if (!resolved.ok) {
+					process.stderr.write(`${chalk.red(resolved.message)}\n`);
 					process.exitCode = 1;
 					return;
 				}
-				const n = flags.account;
-				const other = n !== undefined && n > accounts.length ? entries[n - 1] : undefined;
-				if (other) {
-					const what = other.kind === "api_key" ? "an API key" : "a disabled OAuth account";
-					process.stderr.write(
-						`${chalk.red(`entry ${n} is ${what} (#${other.id}); --account selects OAuth accounts only (1-${accounts.length}).`)}\n`,
-					);
+				if (resolved.selection.kind === "pool") {
+					process.stderr.write(`${chalk.red(`'${flags.credential}' does not name one stored credential.`)}\n`);
 					process.exitCode = 1;
 					return;
 				}
-				if (n === undefined || n < 1 || n > accounts.length) {
-					process.stderr.write(
-						`${chalk.red(`Invalid --account ${n ?? "(missing)"}.`)} Provider "${providerName}" has ${accounts.length} OAuth account(s) (1-${accounts.length}).\n`,
-					);
+				const row = resolved.selection.row;
+				if (row.disabled) {
+					process.stderr.write(`${chalk.red(`#${row.id} is disabled: ${row.disabled}.`)}\n`);
 					process.exitCode = 1;
+					return;
+				}
+				if (row.kind === "api_key") {
+					const stored = authStorage.credentials.list(provider).find(entry => entry.id === row.id);
+					if (stored?.credential.type !== "api_key") {
+						process.stderr.write(`${chalk.red(`#${row.id} has no stored API key.`)}\n`);
+						process.exitCode = 1;
+						return;
+					}
+					process.stdout.write(`${stored.credential.key}\n`);
 					return;
 				}
 				const resolution = managedMcpOAuth
 					? await resolveManagedMcpOAuthToken(authStorage, provider, {
-							credentialId: accounts[n - 1]?.credentialId,
+							credentialId: row.id,
 							forceRefresh: flags["force-refresh"],
 						})
-					: await authStorage.oauth.accessById(provider, accounts[n - 1]!.credentialId, {
+					: await authStorage.oauth.accessById(provider, row.id, {
 							forceRefresh: flags["force-refresh"],
 						});
 				if (typeof resolution === "string") {
@@ -219,9 +227,7 @@ export default class Token extends Command {
 				}
 				if (!resolution?.ok) {
 					const reason = resolution && !resolution.ok ? resolution.error : "no OAuth credential available";
-					process.stderr.write(
-						`${chalk.red(`Could not get token for account ${n} of "${providerName}": ${reason}`)}\n`,
-					);
+					process.stderr.write(`${chalk.red(`Could not get token for #${row.id} of "${providerName}": ${reason}`)}\n`);
 					process.exitCode = 1;
 					return;
 				}

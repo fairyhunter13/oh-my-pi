@@ -28,26 +28,30 @@ describe("resolveCredentialSelector", () => {
 	];
 
 	test("resolves by #id", () => {
-		expect(resolveCredentialSelector(rows, "#3").id).toBe(3);
+		expect(resolveCredentialSelector(rows, "#3", "anthropic").id).toBe(3);
 	});
 
 	test("rejects an id that does not exist", () => {
-		expect(() => resolveCredentialSelector(rows, "#99")).toThrow(/No credential #99/);
+		expect(() => resolveCredentialSelector(rows, "#99", "anthropic")).toThrow(/No anthropic credential matches "#99"/);
 	});
 
 	test("resolves by label, case-insensitive", () => {
-		expect(resolveCredentialSelector(rows, "wORk").id).toBe(1);
+		expect(resolveCredentialSelector(rows, "wORk", "anthropic").id).toBe(1);
 	});
 
 	test("resolves by exact identity/email", () => {
-		expect(resolveCredentialSelector(rows, "personal@example.com").id).toBe(2);
+		expect(resolveCredentialSelector(rows, "personal@example.com", "anthropic").id).toBe(2);
 	});
 
 	test("throws when two rows share the same identity", () => {
-		expect(() => resolveCredentialSelector(rows, "shared@example.com")).toThrow(/matches 2 credentials by identity/);
+		expect(() => resolveCredentialSelector(rows, "shared@example.com", "anthropic")).toThrow(
+			/matches 2 anthropic credentials/,
+		);
 	});
 
 	test("throws when nothing matches", () => {
-		expect(() => resolveCredentialSelector(rows, "nobody@example.com")).toThrow(/No credential matches/);
+		expect(() => resolveCredentialSelector(rows, "nobody@example.com", "anthropic")).toThrow(
+			/No anthropic credential matches/,
+		);
 	});
 });

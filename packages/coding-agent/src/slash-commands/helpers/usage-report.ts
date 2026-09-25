@@ -1,5 +1,6 @@
 import type { CredentialSummary, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { resolveCredentialTarget } from "../../auth/credential-selector";
 import type { AuthCredential, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
@@ -7,33 +8,6 @@ import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 
-/** The ACP "no such credential" text — the TUI shows the identical warning (F7). */
-export function usageTargetNotFoundText(target: string): string {
-	return `No stored credential matches "${target}". List choices with \`/usage\`.`;
-}
-
-/**
- * Resolve `<provider>/<credential id>` or `<provider>/active` against a row
- * list. Shared by the ACP `/usage show` text and the TUI `/usage show`
- * command (F7), so both surfaces resolve one target the same way.
- */
-export function resolveUsageRowByTarget(
-	rows: readonly CredentialSummary[],
-	target: string,
-): CredentialSummary | undefined {
-	const slash = target.indexOf("/");
-	if (slash <= 0) return undefined;
-	const providerId = target.slice(0, slash);
-	const idPart = target
-		.slice(slash + 1)
-		.trim()
-		.toLowerCase();
-	return rows.find(candidate => {
-		if (candidate.provider !== providerId) return false;
-		if (idPart === "active") return candidate.active;
-		return /^\d+$/.test(idPart) && candidate.id === Number(idPart);
-	});
-}
 
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
 	if (!windowLabel) return "";
@@ -246,16 +220,18 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime, arg = "
 		const lines = rows.map(
 			row => `- ${credentialName(row)} [${row.provider}/${row.id}]${row.active ? " (active)" : ""}`,
 		);
-		lines.push("", "Show one with `/usage show <provider>/<credential id>` or `/usage show <provider>/active`.");
+		lines.push("", "Show one with `/usage show <provider>/<id|#id|label|email>` or `/usage show <provider>/active`.");
 		return lines.join("\n");
 	}
 
-	const notFound = usageTargetNotFoundText(target);
-	const row = resolveUsageRowByTarget(rows, target);
-	if (!row) return notFound;
-
+	const resolved = resolveCredentialTarget(rows, target);
+	if (!resolved.ok) return resolved.message;
+	if (resolved.selection.kind === "pool") {
+		return "Choose a stored credential with `/usage show <provider>/<id|#id|label|email>`.";
+	}
+	const row = resolved.selection.row;
 	const stored = authStorage.credentials.list(row.provider).find(entry => entry.id === row.id);
-	if (!stored) return notFound;
+	if (!stored) return `No usage data for ${credentialName(row)} (#${row.id}).`;
 
 	let report: UsageReport | null;
 	try {

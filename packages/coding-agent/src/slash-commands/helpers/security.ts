@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { resolveCredentialTarget } from "../../auth/credential-selector";
 import { parseInternalUrl } from "../../internal-urls/parse";
 import { SecurityProtocolHandler } from "../../internal-urls/security-protocol";
 import validationRequestPrompt from "../../prompts/security/validate-request.md" with { type: "text" };
@@ -24,7 +25,7 @@ interface SecurityPlanCliOptions {
 	knowledgeBasePaths: string[];
 	outputRoot?: string;
 	archiveExisting?: boolean;
-	credentialId?: number;
+	credentialSelector?: string;
 }
 
 const DISPOSITIONS: ReadonlySet<SecurityDispositionStatus> = new Set([
@@ -54,10 +55,15 @@ function requireToken(tokens: readonly string[], index: number, flag: string): s
 	return value;
 }
 
-function parsePositiveCredential(value: string): number {
-	const credentialId = Number(value);
-	if (!Number.isSafeInteger(credentialId) || credentialId < 1) throw new Error(`Invalid credential id: ${value}`);
-	return credentialId;
+/** Resolve a `/security --credential <selector>` value against openai-codex's stored OAuth rows. */
+function resolveSecurityCredentialId(runtime: SlashCommandRuntime, selector: string): number {
+	const rows = runtime.session.modelRegistry.authStorage
+		.listCredentials("openai-codex", runtime.session.sessionId)
+		.filter(row => row.kind === "oauth");
+	const resolved = resolveCredentialTarget(rows, selector, { provider: "openai-codex" });
+	if (!resolved.ok) throw new Error(resolved.message);
+	if (resolved.selection.kind === "pool") throw new Error(`'${selector}' does not name one stored credential.`);
+	return resolved.selection.row.id;
 }
 
 function parsePlanOptions(rest: string): SecurityPlanCliOptions {
@@ -70,7 +76,7 @@ function parsePlanOptions(rest: string): SecurityPlanCliOptions {
 	let headRevision: string | undefined;
 	let outputRoot: string | undefined;
 	let archiveExisting = false;
-	let credentialId: number | undefined;
+	let credentialSelector: string | undefined;
 	for (let index = 0; index < tokens.length; index++) {
 		const token = tokens[index]!;
 		switch (token) {
@@ -100,7 +106,7 @@ function parsePlanOptions(rest: string): SecurityPlanCliOptions {
 				archiveExisting = true;
 				break;
 			case "--credential":
-				credentialId = parsePositiveCredential(requireToken(tokens, ++index, token));
+				credentialSelector = requireToken(tokens, ++index, token);
 				break;
 			default:
 				throw new Error(`Unknown security plan option: ${token}`);
@@ -120,7 +126,7 @@ function parsePlanOptions(rest: string): SecurityPlanCliOptions {
 				: kind === "scoped_path"
 					? { kind, ...common }
 					: { kind: "repository", ...common };
-	return { target, knowledgeBasePaths, outputRoot, archiveExisting, credentialId };
+	return { target, knowledgeBasePaths, outputRoot, archiveExisting, credentialSelector };
 }
 
 async function preflight(runtime: SlashCommandRuntime, rest: string) {
@@ -130,7 +136,7 @@ async function preflight(runtime: SlashCommandRuntime, rest: string) {
 		knowledgeBasePaths: options.knowledgeBasePaths,
 		outputRoot: options.outputRoot,
 		archiveExisting: options.archiveExisting,
-		credentialId: options.credentialId,
+		credentialId: options.credentialSelector ? resolveSecurityCredentialId(runtime, options.credentialSelector) : undefined,
 		model: runtime.session.model,
 	};
 	return coordinatorFor(runtime).preflight(input);
@@ -210,7 +216,7 @@ async function exportResults(runtime: SlashCommandRuntime, rest: string): Promis
 }
 
 interface CloudCliOptions {
-	credentialId?: number;
+	credentialSelector?: string;
 	configurationId?: string;
 	repositoryId?: string;
 	repositoryUrl?: string;
@@ -226,7 +232,7 @@ function parseCloudOptions(rest: string, subcommand: string): CloudCliOptions {
 		const token = tokens[index]!;
 		switch (token) {
 			case "--credential":
-				options.credentialId = parsePositiveCredential(requireToken(tokens, ++index, token));
+				options.credentialSelector = requireToken(tokens, ++index, token);
 				break;
 			case "--repo-id":
 				options.repositoryId = requireToken(tokens, ++index, token);
@@ -270,7 +276,10 @@ async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): P
 	const { verb, rest: optionsText } = parseSubcommand(rest);
 	const subcommand = verb || "scans";
 	const options = parseCloudOptions(optionsText, subcommand);
-	const client = cloudClientFor(runtime, options.credentialId);
+	const client = cloudClientFor(
+		runtime,
+		options.credentialSelector ? resolveSecurityCredentialId(runtime, options.credentialSelector) : undefined,
+	);
 	switch (subcommand) {
 		case "scans": {
 			const configurations = await client.listAllConfigurations();

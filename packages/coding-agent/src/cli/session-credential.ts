@@ -5,11 +5,11 @@
  * independent of every other running session and of the provider-wide
  * default. Resolution is strict — a picker step would need a TTY, and this
  * flag exists so a script can start pinned with no prompt — so any unknown,
- * disabled or malformed value is a hard error listing the enabled rows of
- * that provider, in the same shape as `omp usage`'s `--credential`.
+ * disabled or malformed value is a hard error listing the enabled rows,
+ * through the one grammar every credential selector shares.
  */
 import type { AuthStorage, CredentialSummary } from "@oh-my-pi/pi-ai";
-import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
+import { resolveCredentialTarget } from "../auth/credential-selector";
 
 /** One resolved `--credential <provider>/<id>` target. */
 export interface SessionCredentialTarget {
@@ -17,36 +17,15 @@ export interface SessionCredentialTarget {
 	row: CredentialSummary;
 }
 
-/** Enabled rows of `provider`, formatted the way `omp usage`'s picker lists choices. */
-function listChoices(authStorage: AuthStorage, provider: string): string[] {
-	return authStorage
-		.listCredentials(provider)
-		.filter(row => row.disabled === null)
-		.map(
-			row =>
-				`  ${row.provider}/${row.id}  ${credentialName(row)}  (${row.kind === "oauth" ? "subscription" : "API key"})`,
-		);
-}
-
 /** Resolve one `--credential` value against the stored, enabled rows. */
 export function resolveSessionCredentialArg(authStorage: AuthStorage, arg: string): SessionCredentialTarget | string {
-	const slash = arg.indexOf("/");
-	if (slash <= 0) return `"${arg}" is not "<provider>/<credential id>".`;
-	const provider = arg.slice(0, slash).toLowerCase();
-	const idPart = arg.slice(slash + 1);
-	if (!/^\d+$/.test(idPart)) return `"${arg}" is not "<provider>/<credential id>".`;
-	const id = Number(idPart);
-	const row = authStorage.listCredentials(provider).find(entry => entry.id === id && entry.disabled === null);
-	if (!row) {
-		const choices = listChoices(authStorage, provider);
-		const disabledMatch = authStorage.listCredentials(provider).find(entry => entry.id === id);
-		const reason = disabledMatch ? "is disabled" : "matches no stored row";
-		if (choices.length === 0) {
-			return `"${arg}" ${reason}. No enabled stored credential for provider "${provider}". Use /login to add one.`;
-		}
-		return `"${arg}" ${reason}. Pick a credential with --credential <provider>/<id>:\n${choices.join("\n")}`;
+	const rows = authStorage.listCredentials().filter(row => row.disabled === null);
+	const resolved = resolveCredentialTarget(rows, arg);
+	if (!resolved.ok) return resolved.message;
+	if (resolved.selection.kind === "pool") {
+		return `"${arg}" is not "<provider>/<id|active|#id|label|email>".`;
 	}
-	return { provider, row };
+	return { provider: resolved.selection.row.provider, row: resolved.selection.row };
 }
 
 /**

@@ -1,6 +1,8 @@
+import type { CredentialSummary } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
 import type { AgentSession } from "../session/agent-session";
+import { resolveCredentialTarget } from "../auth/credential-selector";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -16,23 +18,26 @@ import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, toResetUsageAccounts } from "./helpers/reset-usage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
-import { matchSessionPinSelector } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
-function normalizeResetProvider(value: string): string | undefined {
-	switch (value.trim().toLowerCase()) {
-		case "anthropic":
-		case "claude":
-			return "anthropic";
-		case "openai-codex":
-		case "codex":
-			return "openai-codex";
-		default:
-			return undefined;
-	}
+/** A saved-reset account as a selectable "row", so `/usage reset` shares the one credential grammar. */
+function resetAccountRow(account: ResetUsageAccount): CredentialSummary {
+	return {
+		id: account.target.credentialId,
+		provider: account.provider,
+		kind: "oauth",
+		label: null,
+		identity: account.target.email ?? account.target.accountId ?? null,
+		org: account.target.orgId ?? null,
+		hint: null,
+		disabled: null,
+		isDefault: false,
+		active: account.active,
+		pinned: false,
+	};
 }
 
 async function handleUsageResetCommand(
@@ -70,31 +75,22 @@ async function handleUsageResetCommand(
 				`- ${safe(account.label)} [${safe(account.providerLabel)} · ${account.provider}/${account.target.credentialId}]: ${detail}${account.active ? " (active)" : ""}`,
 			);
 		}
-		lines.push("", "Spend one with `/usage reset <provider>/<credential id>` or `/usage reset <provider>/active`.");
+		lines.push("", "Spend one with `/usage reset <provider>/<id|#id|label|email>` or `/usage reset <provider>/active`.");
 		await output(lines.join("\n"));
 		return;
 	}
 
-	const slash = targetArg.indexOf("/");
-	if (slash <= 0) {
-		await output("Choose an account with `/usage reset <provider>/<credential id>`.");
+	const resolved = resolveCredentialTarget(accounts.map(resetAccountRow), targetArg);
+	if (!resolved.ok) {
+		await output(safe(resolved.message));
 		return;
 	}
-	const requestedProvider = normalizeResetProvider(targetArg.slice(0, slash));
-	const requestedAccount = targetArg
-		.slice(slash + 1)
-		.trim()
-		.toLowerCase();
-	if (!requestedProvider) {
-		await output(`Unknown reset provider "${safe(targetArg.slice(0, slash))}". Use anthropic or openai-codex.`);
+	if (resolved.selection.kind === "pool") {
+		await output("Choose a stored credential with `/usage reset <provider>/<id|#id|label|email>`.");
 		return;
 	}
-	const requestedCredentialId = /^\d+$/.test(requestedAccount) ? Number(requestedAccount) : undefined;
-	const target = accounts.find(account => {
-		if (account.provider !== requestedProvider) return false;
-		if (requestedAccount === "active") return account.active;
-		return requestedCredentialId !== undefined && account.target.credentialId === requestedCredentialId;
-	});
+	const pickedRow = resolved.selection.row;
+	const target = accounts.find(account => account.target.credentialId === pickedRow.id);
 	if (!target) {
 		await output(`No stored account matches "${safe(targetArg)}". List choices with \`/usage reset\`.`);
 		return;
@@ -117,11 +113,6 @@ async function handleSessionPinCommand(
 		await output("Cannot pin an account while the session is streaming.");
 		return;
 	}
-	const provider = session.model?.provider;
-	if (!provider) {
-		await output("Select a model before pinning a provider account.");
-		return;
-	}
 	const authStorage = session.modelRegistry.authStorage;
 	try {
 		await authStorage.credentials.reload();
@@ -129,61 +120,51 @@ async function handleSessionPinCommand(
 		await output(`Could not load stored credentials: ${errorMessage(error)}`);
 		return;
 	}
-	const providerInfo = getOAuthProviders().find(candidate => candidate.id === provider);
-	const providerName = providerInfo?.name ?? provider;
-	const rows = authStorage.listCredentials(provider, session.sessionId).filter(row => row.disabled === null);
+	const rows = authStorage.listCredentials(undefined, session.sessionId).filter(row => row.disabled === null);
 	if (rows.length === 0) {
-		const source = authStorage.keys.describe(provider, session.sessionId);
-		await output(
-			source
-				? `No stored credentials for ${providerName}. Current auth comes from ${source}.`
-				: `No stored credentials for ${providerName}. Use /login to add one.`,
-		);
+		await output("No stored credentials. Use /login to add one.");
 		return;
 	}
 
 	const selector = arg.trim();
 	if (!selector) {
-		const lines = [`Credentials for ${providerName}:`];
-		rows.forEach((row, index) => {
-			lines.push(`${index + 1}. ${credentialName(row)}${row.active ? " (active)" : ""}`);
+		const lines = ["Stored credentials:"];
+		rows.forEach(row => {
+			lines.push(`${row.id}. ${row.provider}/${credentialName(row)}${row.active ? " (active)" : ""}`);
 		});
 		lines.push(
 			"",
-			"Pin one with `/session pin <number|label|email|#id>`, or `/session pin pool` to pick again at the next request.",
+			"Pin one with `/session pin <provider>/<id|#id|label|email>`, or `/session pin <provider>/pool` to pick again at the next request.",
 		);
 		await output(lines.join("\n"));
 		return;
 	}
 
-	const matches = matchSessionPinSelector(rows, selector);
-	if (matches.length === 0) {
-		await output(`No ${providerName} credential matches "${selector}".`);
+	const slash = selector.indexOf("/");
+	const provider = (slash > 0 ? selector.slice(0, slash) : session.model?.provider)?.toLowerCase();
+	if (!provider) {
+		await output("Select a model before pinning a provider account, or name one with `/session pin <provider>/…`.");
 		return;
 	}
-	if (matches.length > 1) {
-		await output(
-			`"${selector}" matches multiple ${providerName} credentials: ${matches
-				.map(match => {
-					const row = match.kind === "row" ? match.row : undefined;
-					return row ? `${rows.indexOf(row) + 1}. ${credentialName(row)}` : "pool";
-				})
-				.join(", ")}. Use the number or #id.`,
-		);
+	const providerInfo = getOAuthProviders().find(candidate => candidate.id === provider);
+	const providerName = providerInfo?.name ?? provider;
+
+	const resolved = resolveCredentialTarget(rows, selector, { provider, allowPool: true });
+	if (!resolved.ok) {
+		await output(resolved.message);
 		return;
 	}
-	const match = matches[0];
-	if (!match) return;
-	if (match.kind === "pool") {
+	if (resolved.selection.kind === "pool") {
 		authStorage.clearSessionCredential(provider, session.sessionId);
 		await output(`This session uses the pool again for ${providerName}.`);
 		return;
 	}
-	if (!authStorage.pinSessionCredential(provider, session.sessionId, match.row.id)) {
-		await output(`${credentialName(match.row)} is no longer available to pin.`);
+	const row = resolved.selection.row;
+	if (!authStorage.pinSessionCredential(provider, session.sessionId, row.id)) {
+		await output(`${credentialName(row)} is no longer available to pin.`);
 		return;
 	}
-	await output(`Pinned ${credentialName(match.row)} to this session for ${providerName}.`);
+	await output(`Pinned ${credentialName(row)} to this session for ${providerName}.`);
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [

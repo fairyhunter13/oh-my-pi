@@ -50,8 +50,8 @@ export default class AuthBroker extends Command {
 			description: "Also upload OAuth from local SQLite during migrate (default skips them)",
 		}),
 		"dry-run": Flags.boolean({ description: "Print actions without executing (import / login --via / migrate)" }),
-		account: Flags.string({
-			description: "Select one stored credential by label, identity/email, or #id (logout)",
+		credential: Flags.string({
+			description: "Select one stored credential of the provider: id, #id, active, label or identity/email (logout)",
 		}),
 		all: Flags.boolean({ description: "Select every stored credential for the provider (logout)" }),
 		yes: Flags.boolean({ description: "Skip the removal confirmation prompt (logout)", char: "y" }),
@@ -68,7 +68,7 @@ export default class AuthBroker extends Command {
 		"# Interactive provider selection\n  omp auth-broker login",
 		"# Remote login over SSH tunnel\n  omp auth-broker login anthropic --via=user@broker",
 		"# Log out of a provider (interactive picker for provider and credential)\n  omp auth-broker logout anthropic",
-		"# Remove one credential by name or id, no prompt\n  omp auth-broker logout anthropic --account work --yes",
+		"# Remove one credential by name or id, no prompt\n  omp auth-broker logout anthropic --credential work --yes",
 		"# Remove every stored credential for a provider\n  omp auth-broker logout anthropic --all --yes",
 		"# Import a CLIProxyAPI auth dump\n  omp auth-broker import ~/.cliproxy/auth",
 		"# Import a single CLIProxyAPI JSON, overriding the provider mapping\n  omp auth-broker import ~/.cliproxy/auth/claude-foo.json --provider anthropic",
@@ -102,7 +102,7 @@ export default class AuthBroker extends Command {
 				includeEnv: flags["include-env"],
 				includeOauth: flags["include-oauth"],
 				dryRun: flags["dry-run"],
-				account: flags.account,
+				credential: flags.credential,
 				all: flags.all,
 				yes: flags.yes,
 				force: flags.force,

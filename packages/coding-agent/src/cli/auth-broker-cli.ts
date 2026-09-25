@@ -38,6 +38,7 @@ import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, V
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
+import { resolveCredentialTarget } from "../auth/credential-selector";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
@@ -73,8 +74,8 @@ export interface AuthBrokerCommandArgs {
 		includeEnv?: boolean;
 		/** `migrate`: required `--from-local` source. Reserved for future sources. */
 		fromLocal?: boolean;
-		/** `logout`: select one stored credential by label (case-insensitive), exact identity/email, or `#id`. */
-		account?: string;
+		/** `logout`: select one stored credential — id, `#id`, `active`, label or identity/email — of the given provider. */
+		credential?: string;
 		/** `logout`: select every stored credential for the provider. */
 		all?: boolean;
 		/** `logout`: skip the removal confirmation prompt. */
@@ -375,35 +376,20 @@ function formatCredentialRow(row: CredentialSummary): string {
 }
 
 /**
- * Resolve `--account <selector>` against one provider's stored rows.
- * `#<id>` matches the row id. Anything else matches the label
- * (case-insensitive; unique per provider, so it never ambiguates) first,
- * then the identity (oauth email/account id, case-insensitive) — which CAN
- * ambiguate when two rows share the same identity.
+ * Resolve `--credential <selector>` (or `<provider>/<selector>`) against one
+ * provider's stored rows, through the one grammar every credential selector
+ * shares: an id, `#id`, `active`, a label (case-insensitive) or an identity
+ * (oauth email/account id, case-insensitive).
  */
-export function resolveCredentialSelector(rows: readonly CredentialSummary[], selector: string): CredentialSummary {
-	const trimmed = selector.trim();
-	if (trimmed.startsWith("#")) {
-		const id = Number.parseInt(trimmed.slice(1), 10);
-		if (Number.isNaN(id)) throw new Error(`Invalid credential selector '${selector}'`);
-		const row = rows.find(candidate => candidate.id === id);
-		if (!row) throw new Error(`No credential #${id} for this provider`);
-		return row;
-	}
-	const wanted = trimmed.toLowerCase();
-	const byLabel = rows.filter(row => row.label?.toLowerCase() === wanted);
-	if (byLabel.length === 1) return byLabel[0];
-	if (byLabel.length > 1) {
-		throw new Error(`'${selector}' matches ${byLabel.length} credentials by name; use --account '#<id>' instead`);
-	}
-	const byIdentity = rows.filter(row => row.identity?.toLowerCase() === wanted);
-	if (byIdentity.length === 1) return byIdentity[0];
-	if (byIdentity.length > 1) {
-		throw new Error(
-			`'${selector}' matches ${byIdentity.length} credentials by identity; use --account '#<id>' instead`,
-		);
-	}
-	throw new Error(`No credential matches '${selector}'`);
+export function resolveCredentialSelector(
+	rows: readonly CredentialSummary[],
+	selector: string,
+	provider: string,
+): CredentialSummary {
+	const resolved = resolveCredentialTarget(rows, selector, { provider });
+	if (!resolved.ok) throw new Error(resolved.message);
+	if (resolved.selection.kind === "pool") throw new Error(`'${selector}' does not name one stored credential.`);
+	return resolved.selection.row;
 }
 
 interface StoredProviderCount {
@@ -462,12 +448,14 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		let selected: CredentialSummary[];
 		if (flags.all) {
 			selected = rows;
-		} else if (flags.account) {
-			selected = [resolveCredentialSelector(rows, flags.account)];
+		} else if (flags.credential) {
+			selected = [resolveCredentialSelector(rows, flags.credential, providerArg)];
 		} else if (process.stdin.isTTY === true) {
 			selected = await pickStoredCredentialsInteractively(providerArg, rows);
 		} else {
-			throw new Error(`${providerArg} has ${rows.length} stored credential(s). Pass --account <selector> or --all.`);
+			throw new Error(
+				`${providerArg} has ${rows.length} stored credential(s). Pass --credential <id|active|#id|label|email> or --all.`,
+			);
 		}
 
 		for (const row of selected) {

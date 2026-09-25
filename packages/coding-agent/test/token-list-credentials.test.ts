@@ -88,8 +88,8 @@ describe("omp token --list", () => {
 		expect(stdout.join("")).not.toContain("sk-");
 	});
 
-	it("numbers OAuth accounts first, and --account on an API-key entry refuses", async () => {
-		const { oauth, work } = await seed(true);
+	it("numbers OAuth accounts first in --list, and --credential selects any row by id", async () => {
+		const { oauth, work, old } = await seed(true);
 
 		await new Token([PROVIDER, "--list"], config).run();
 		expect(stdout.join("").split("\n").slice(0, 2)).toEqual([
@@ -98,9 +98,16 @@ describe("omp token --list", () => {
 		]);
 
 		stdout = [];
-		await new Token([PROVIDER, "--account", "2"], config).run();
+		await new Token([PROVIDER, "--credential", `${work}`], config).run();
+		expect(stdout.join("")).toBe("sk-work-1111\n");
+		expect(stderr.join("")).toBe("");
+		expect(process.exitCode || 0).toBe(0);
+
+		stdout = [];
+		stderr = [];
+		await new Token([PROVIDER, "--credential", `${old}`], config).run();
 		expect(stdout.join("")).toBe("");
-		expect(stderr.join("")).toContain(`entry 2 is an API key (#${work}); --account selects OAuth accounts only (1-1).`);
+		expect(stderr.join("")).toContain(`#${old} is disabled: disabled by user`);
 		expect(process.exitCode).toBe(1);
 	});
 });
