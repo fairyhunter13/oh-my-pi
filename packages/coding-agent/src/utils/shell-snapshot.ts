@@ -169,6 +169,30 @@ echo "unalias -a 2>/dev/null || true" >> "$SNAPSHOT_FILE"
 __omp_funcs=$(
 ${functionExtractor}
 )
+# The name filter above drops private functions, but a kept function may call one:
+# gvm's \`cd\` calls \`__gvm_*\`, a pinned launcher calls \`_pin_now\`. Keep every
+# private function a kept body names, to a fixed point, or the replay dies on
+# \`command not found\`. Unreferenced completion helpers stay out.
+# One \`-f\` call per round, over only the text the last round added: on a real rc
+# with 163 kept functions this costs 150-200 ms at load 40.
+__omp_seen=" "
+__omp_round=0
+__omp_scan="$__omp_funcs"
+while [ "$__omp_round" -lt 8 ]; do
+   __omp_round=$((__omp_round + 1))
+   __omp_names=""
+   for __omp_name in $(printf '%s\\n' "$__omp_scan" | grep -oE '[A-Za-z0-9_]+' | grep '^_' | sort -u); do
+      case "$__omp_seen" in *" $__omp_name "*) continue ;; esac
+      __omp_seen="$__omp_seen$__omp_name "
+      __omp_names="$__omp_names $__omp_name"
+   done
+   [ -z "$__omp_names" ] && break
+   __omp_scan=$(${isZsh ? "typeset -f \${=__omp_names}" : "declare -f $__omp_names"} 2>/dev/null)
+   [ -z "$__omp_scan" ] && break
+   __omp_funcs="$__omp_funcs
+$__omp_scan"
+done
+unset __omp_seen __omp_round __omp_scan __omp_names
 echo "# Functions" >> "$SNAPSHOT_FILE"
 printf '%s\\n' "$__omp_funcs" >> "$SNAPSHOT_FILE"
 

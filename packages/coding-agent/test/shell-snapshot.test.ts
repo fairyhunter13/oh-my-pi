@@ -293,6 +293,38 @@ describe("getOrCreateSnapshot", () => {
 		expect(dirStat.mode & 0o077).toBe(0);
 	});
 
+	it("keeps a private helper that a kept function calls, and drops one nothing calls", async () => {
+		// gvm's `cd` calls `__gvm_*` helpers. The `^(_|__)` filter dropped them, so every
+		// `cd` in the replay printed `command not found` and never changed directory.
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-helpers-"));
+		await fs.writeFile(
+			path.join(home, ".bashrc"),
+			[
+				`__pick_dir () { __pick_inner "$1"; }`,
+				`__pick_inner () { printf '%s' "$1"; }`,
+				`_unused_completion () { :; }`,
+				`hop () { builtin cd "$(__pick_dir "$1")"; }`,
+				``,
+			].join("\n"),
+		);
+		if (!existsSync(REAL_BASH)) return;
+		const shellLink = path.join(home, "bash-omp-helpers");
+		await fs.symlink(REAL_BASH, shellLink);
+		const snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home });
+		expect(snapshotPath).not.toBeNull();
+		const content = await fs.readFile(snapshotPath!, "utf8");
+		expect(content).not.toContain("_unused_completion");
+
+		const replay = Bun.spawn(
+			[REAL_BASH, "--noprofile", "--norc", "-c", `source "$1"; hop /tmp; pwd`, "_", snapshotPath!],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const stdout = await readStream(replay.stdout as ReadableStream<Uint8Array> | null);
+		const stderr = await readStream(replay.stderr as ReadableStream<Uint8Array> | null);
+		await replay.exited;
+		expect({ exitCode: replay.exitCode, stderr, stdout }).toEqual({ exitCode: 0, stderr: "", stdout: "/tmp\n" });
+	});
+
 	it("keeps the snapshot file at 0600 even when the rc file resets umask to 022", async () => {
 		// PR-review regression: previous revision ran `umask 077` BEFORE sourcing
 		// the rc, so a typical `.bashrc` with `umask 022` reopened the world-read
