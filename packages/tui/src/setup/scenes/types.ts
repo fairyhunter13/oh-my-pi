@@ -43,6 +43,27 @@ export interface SetupHost extends SetupUiHost {
 	markComplete(version: number): Promise<void>;
 	playWelcomeIntro(): void;
 	showError(message: string): void;
+	/** Fenced usage-report text for one stored credential, same content `/usage <provider>/<id>` shows. */
+	usageLines?(provider: string, id: number): Promise<string[]>;
+	/** Live saved-reset status for one credential, or `undefined` when it has none right now. */
+	resetStatus?(
+		provider: string,
+		id: number,
+	): Promise<{ lines: string[]; redeemable: boolean; autoRedeem: "unset" | "yes" | "no" } | undefined>;
+	/** Spend one saved reset for this credential now; returns the outcome as text. */
+	redeemReset?(provider: string, id: number): Promise<string>;
+	/** Set this credential's own auto-redeem answer, overriding the provider-wide setting. */
+	setAutoRedeem?(provider: string, id: number, value: "unset" | "yes" | "no"): void;
+	/** This credential's routing policy (priority, reserve %), subscriptions only. */
+	accountPolicy?(provider: string, id: number): { priority?: number; reservePct?: number } | undefined;
+	/** Save (or clear, with `undefined`) this credential's routing policy; returns an error message on failure. */
+	saveAccountPolicy?(
+		provider: string,
+		id: number,
+		policy: { priority?: number; reservePct?: number } | undefined,
+	): string | undefined;
+	/** Drop this credential's per-credential settings (policy, auto-redeem) before it is removed. */
+	forgetCredential?(provider: string, id: number): void;
 }
 
 /** Outcome reported when an onboarding scene finishes. */

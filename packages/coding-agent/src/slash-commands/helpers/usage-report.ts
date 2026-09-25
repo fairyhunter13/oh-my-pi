@@ -178,6 +178,29 @@ function identityOfStoredCredential(
 	return Object.keys(identity).length > 0 ? identity : undefined;
 }
 
+/**
+ * Text lines for one credential's usage report: `No usage data…` when the
+ * fetch returned nothing, else the same fenced block `/usage <provider>/<id>`
+ * has always rendered. `buildUsageReportText` passes `options` so its
+ * in-use marker and model-selector list survive the extraction unchanged;
+ * the Credentials tab's "Usage…" action, which has only the row and the
+ * report, omits them.
+ */
+export function usageReportLines(
+	row: CredentialSummary,
+	report: UsageReport | null,
+	options?: { identity?: OAuthAccountIdentity; usageModelSelectors?: readonly string[] },
+): string[] {
+	if (!report) return [`No usage data for ${credentialName(row)} (#${row.id}).`];
+	const identity = options?.identity;
+	return renderUsageReports(
+		[report],
+		Date.now(),
+		identity ? () => identity : undefined,
+		options?.usageModelSelectors ?? [],
+	).split("\n");
+}
+
 /** Local session-manager tallies: the fallback for a session with no usage support. */
 function sessionTallyText(runtime: SlashCommandRuntime): string {
 	const stats = runtime.session.sessionManager.getUsageStatistics();
@@ -246,5 +269,5 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime, arg = "
 
 	const usageModelSelectors = provider.getUsageReportingModelSelectors?.([report]) ?? [];
 	const identity = identityOfStoredCredential(row, stored);
-	return renderUsageReports([report], Date.now(), () => identity, usageModelSelectors);
+	return usageReportLines(row, report, { identity, usageModelSelectors }).join("\n");
 }

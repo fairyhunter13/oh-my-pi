@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AgentsHubDeps.describeBinding`/`saveBinding`: when a host wires them up, `/agents` shows each agent's bound credential and edits go through the host's mapping instead of `setOverrides`/`setDisabledAgents`.
+- Added optional `SetupHost.usageLines`/`resetStatus`/`redeemReset`/`setAutoRedeem`/`accountPolicy`/`saveAccountPolicy`/`forgetCredential`: the Credentials tab now shows a per-row `Usage…` action, a `Saved resets…` action (Anthropic/Codex subscriptions, with an inline auto-redeem answer per credential), and, for subscriptions only, a `Priority and reserve…` routing-policy editor; removing a row calls `forgetCredential` first. This is part of a series across `pi-ai`/`pi-coding-agent`/`pi-tui` that gives every single-credential command one selector grammar (`<provider>/<active|pool|id|#id|label|email>`) and routes `/usage reset` and `/session pin` through the shared credential picker for any provider.
 
 ## [18.3.1] - 2026-09-25
 

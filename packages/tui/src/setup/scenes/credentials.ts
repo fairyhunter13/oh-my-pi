@@ -24,7 +24,14 @@ type View =
 	| { kind: "newScope"; provider: string; id: number }
 	| { kind: "remove"; provider: string; id: number }
 	| { kind: "field"; provider: string; field: TextFormField }
-	| { kind: "login"; provider: string; oauth: OAuthProviderInfo };
+	| { kind: "login"; provider: string; oauth: OAuthProviderInfo }
+	| {
+			kind: "resets";
+			provider: string;
+			id: number;
+			status?: { lines: string[]; redeemable: boolean; autoRedeem: "unset" | "yes" | "no" };
+	  }
+	| { kind: "policy"; provider: string; id: number; priority: number | undefined; reservePct: number | undefined };
 
 /**
  * "Credentials" panel: every stored credential per provider (each OAuth
@@ -130,6 +137,10 @@ export class CredentialsTab implements SetupTab {
 				return `${view.provider}: Enter saves, Esc cancels.`;
 			case "login":
 				return `Signing in to ${view.oauth.name} for ${view.provider}. Esc cancels.`;
+			case "resets":
+				return `${view.provider}: Saved resets for ${this.#describe(view.provider, view.id)}. Esc goes back.`;
+			case "policy":
+				return `${view.provider}: Priority and reserve for ${this.#describe(view.provider, view.id)}. Esc goes back.`;
 		}
 	}
 
@@ -249,7 +260,14 @@ export class CredentialsTab implements SetupTab {
 			case "actions": {
 				const row = this.#rows(view.provider).find(candidate => candidate.id === view.id);
 				const items: SelectItem[] = [];
-				if (row && !row.disabled) items.push({ value: "use", label: "Use this credential…" });
+				if (row && !row.disabled) {
+					items.push({ value: "use", label: "Use this credential…" });
+					if (this.#host.ctx.usageLines) items.push({ value: "usage", label: "Usage…" });
+					if (view.provider === "anthropic" || view.provider === "openai-codex") {
+						items.push({ value: "resets", label: "Saved resets…" });
+					}
+					if (row.kind === "oauth") items.push({ value: "policy", label: "Priority and reserve…" });
+				}
 				items.push({ value: "rename", label: "Rename" });
 				items.push(row?.disabled ? { value: "enable", label: "Enable" } : { value: "disable", label: "Disable" });
 				items.push({ value: "remove", label: "Remove…" });
@@ -289,6 +307,24 @@ export class CredentialsTab implements SetupTab {
 					{ value: "no", label: "Keep it" },
 					{ value: "yes", label: `Remove ${this.#describe(view.provider, view.id)}` },
 				];
+			case "resets": {
+				const status = view.status;
+				if (!status) return [];
+				const items: SelectItem[] = [];
+				if (status.redeemable) items.push({ value: "spend", label: "Spend one now" });
+				const mark = (option: "unset" | "yes" | "no") => (status.autoRedeem === option ? " (current)" : "");
+				items.push({ value: "auto:ask", label: `Auto-redeem for this credential: ask${mark("unset")}` });
+				items.push({ value: "auto:yes", label: `Auto-redeem for this credential: yes${mark("yes")}` });
+				items.push({ value: "auto:no", label: `Auto-redeem for this credential: no${mark("no")}` });
+				return items;
+			}
+			case "policy":
+				return [
+					{ value: "priority", label: `Priority: ${view.priority ?? "not set"}` },
+					{ value: "reservePct", label: `Reserve: ${view.reservePct !== undefined ? `${view.reservePct}%` : "not set"}` },
+					{ value: "save", label: "Save" },
+					{ value: "clear", label: "Clear" },
+				];
 			default:
 				return [];
 		}
@@ -314,6 +350,10 @@ export class CredentialsTab implements SetupTab {
 			} else if (view.kind === "remove") {
 				if (value === "yes") void this.#remove(view.provider, view.id);
 				else this.#show({ kind: "actions", provider: view.provider, id: view.id });
+			} else if (view.kind === "resets") {
+				this.#chooseReset(view, value);
+			} else if (view.kind === "policy") {
+				this.#choosePolicy(view, value);
 			}
 		} catch (error) {
 			this.#show(view, [theme.fg("error", error instanceof Error ? error.message : String(error))]);
@@ -362,6 +402,13 @@ export class CredentialsTab implements SetupTab {
 		const name = this.#describe(provider, id);
 		if (value === "use") {
 			this.#show({ kind: "scope", provider, id }, []);
+		} else if (value === "usage") {
+			void this.#showUsage(provider, id);
+		} else if (value === "resets") {
+			void this.#openResets(provider, id);
+		} else if (value === "policy") {
+			const current = this.#host.ctx.accountPolicy?.(provider, id);
+			this.#show({ kind: "policy", provider, id, priority: current?.priority, reservePct: current?.reservePct }, []);
 		} else if (value === "rename") {
 			const row = this.#rows(provider).find(candidate => candidate.id === id);
 			this.#askText(provider, {
@@ -380,6 +427,145 @@ export class CredentialsTab implements SetupTab {
 		} else if (value === "remove") {
 			this.#show({ kind: "remove", provider, id }, []);
 		}
+	}
+
+	/** Writes the credential's usage-report lines into the status area. */
+	async #showUsage(provider: string, id: number): Promise<void> {
+		const view = this.#view;
+		this.#show(view, [theme.fg("dim", "Loading usage…")]);
+		try {
+			const lines = (await this.#host.ctx.usageLines?.(provider, id)) ?? [];
+			if (this.#disposed) return;
+			this.#show(view, lines);
+		} catch (error) {
+			if (this.#disposed) return;
+			this.#show(view, [theme.fg("error", error instanceof Error ? error.message : String(error))]);
+		}
+	}
+
+	/** Fetch live saved-reset status for one credential and open the "resets" view over it. */
+	async #openResets(provider: string, id: number): Promise<void> {
+		this.#show({ kind: "resets", provider, id }, [theme.fg("dim", "Checking…")]);
+		try {
+			const status = await this.#host.ctx.resetStatus?.(provider, id);
+			if (this.#disposed) return;
+			if (!status) {
+				this.#show({ kind: "resets", provider, id }, [theme.fg("warning", "No saved reset for this credential.")]);
+				return;
+			}
+			this.#show({ kind: "resets", provider, id, status }, status.lines);
+		} catch (error) {
+			if (this.#disposed) return;
+			this.#show(
+				{ kind: "resets", provider, id },
+				[theme.fg("error", error instanceof Error ? error.message : String(error))],
+			);
+		}
+	}
+
+	#chooseReset(view: Extract<View, { kind: "resets" }>, value: string): void {
+		if (value === "spend") {
+			void this.#spendReset(view.provider, view.id);
+			return;
+		}
+		if (!value.startsWith("auto:") || !view.status) return;
+		const option = value.slice("auto:".length);
+		const next: "unset" | "yes" | "no" | undefined =
+			option === "ask" ? "unset" : option === "yes" ? "yes" : option === "no" ? "no" : undefined;
+		if (!next) return;
+		this.#host.ctx.setAutoRedeem?.(view.provider, view.id, next);
+		this.#show({ ...view, status: { ...view.status, autoRedeem: next } }, [theme.fg("success", "Saved.")]);
+	}
+
+	async #spendReset(provider: string, id: number): Promise<void> {
+		const view = this.#view;
+		this.#show(view, [theme.fg("dim", "Spending…")]);
+		try {
+			const message = await this.#host.ctx.redeemReset?.(provider, id);
+			if (this.#disposed) return;
+			this.#show({ kind: "actions", provider, id }, [theme.fg("success", message ?? "Done.")]);
+		} catch (error) {
+			if (this.#disposed) return;
+			this.#show(view, [theme.fg("error", error instanceof Error ? error.message : String(error))]);
+		}
+	}
+
+	#choosePolicy(view: Extract<View, { kind: "policy" }>, value: string): void {
+		if (value === "priority") {
+			this.#askText(view.provider, {
+				label: "Priority (blank clears it)",
+				initialValue: view.priority !== undefined ? String(view.priority) : "",
+				onSubmit: text => this.#submitPriority(view, text),
+				onCancel: () => this.#show(view, []),
+			});
+		} else if (value === "reservePct") {
+			this.#askText(view.provider, {
+				label: "Reserve % 0-100 (blank clears it)",
+				initialValue: view.reservePct !== undefined ? String(view.reservePct) : "",
+				onSubmit: text => this.#submitReservePct(view, text),
+				onCancel: () => this.#show(view, []),
+			});
+		} else if (value === "save") {
+			const policy: { priority?: number; reservePct?: number } = {};
+			if (view.priority !== undefined) policy.priority = view.priority;
+			if (view.reservePct !== undefined) policy.reservePct = view.reservePct;
+			this.#applyPolicy(view, policy, "Saved.");
+		} else if (value === "clear") {
+			this.#applyPolicy(view, undefined, "Cleared.");
+		}
+	}
+
+	#submitPriority(view: Extract<View, { kind: "policy" }>, text: string): void {
+		const trimmed = text.trim();
+		if (trimmed === "") {
+			this.#show({ ...view, priority: undefined }, []);
+			return;
+		}
+		const value = Number(trimmed);
+		if (!Number.isFinite(value)) {
+			this.#askText(view.provider, {
+				label: "Priority (blank clears it)",
+				initialValue: text,
+				onSubmit: retryText => this.#submitPriority(view, retryText),
+				onCancel: () => this.#show(view, []),
+			});
+			this.#status = [theme.fg("error", "Priority must be a number.")];
+			return;
+		}
+		this.#show({ ...view, priority: value }, []);
+	}
+
+	#submitReservePct(view: Extract<View, { kind: "policy" }>, text: string): void {
+		const trimmed = text.trim();
+		if (trimmed === "") {
+			this.#show({ ...view, reservePct: undefined }, []);
+			return;
+		}
+		const value = Number(trimmed);
+		if (!Number.isFinite(value) || value < 0 || value > 100) {
+			this.#askText(view.provider, {
+				label: "Reserve % 0-100 (blank clears it)",
+				initialValue: text,
+				onSubmit: retryText => this.#submitReservePct(view, retryText),
+				onCancel: () => this.#show(view, []),
+			});
+			this.#status = [theme.fg("error", "Reserve % must be 0-100.")];
+			return;
+		}
+		this.#show({ ...view, reservePct: value }, []);
+	}
+
+	#applyPolicy(
+		view: Extract<View, { kind: "policy" }>,
+		policy: { priority?: number; reservePct?: number } | undefined,
+		successMessage: string,
+	): void {
+		const error = this.#host.ctx.saveAccountPolicy?.(view.provider, view.id, policy);
+		if (error) {
+			this.#show(view, [theme.fg("error", error)]);
+			return;
+		}
+		this.#show({ kind: "actions", provider: view.provider, id: view.id }, [theme.fg("success", successMessage)]);
 	}
 
 	#chooseScope(provider: string, id: number, value: string): void {
@@ -455,6 +641,7 @@ export class CredentialsTab implements SetupTab {
 	async #remove(provider: string, id: number): Promise<void> {
 		const row = this.#rows(provider).find(candidate => candidate.id === id);
 		const name = this.#describe(provider, id);
+		this.#host.ctx.forgetCredential?.(provider, id);
 		const removed = await this.#authStorage.removeCredential(provider, id, { sessionId: this.#host.ctx.sessionId });
 		if (this.#disposed) return;
 		const status = removed

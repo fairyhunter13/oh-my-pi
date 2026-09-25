@@ -12,6 +12,14 @@ import {
 import { formatModelString, resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
 import { getRoleInfo, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import { accountPolicyFor, forgetCredentialSettings, saveAccountPolicy } from "../auth/credential-settings";
+import { usageReportLines } from "../slash-commands/helpers/usage-report";
+import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
+import { describeRedeemOutcome, toResetUsageAccounts } from "../slash-commands/helpers/reset-usage";
+import {
+	cfgClaudeResetsAutoRedeemByCredential,
+	cfgCodexResetsAutoRedeemByCredential,
+} from "../session/settings";
 import { captureBrowserSession } from "../utils/browser-session";
 import { copyToClipboard } from "../utils/clipboard";
 import { getGroundedSearchProvider, getSearchProvider } from "../web/search/provider";
@@ -163,6 +171,72 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		markComplete: version => markSetupWizardComplete(ctx.settings, version),
 		playWelcomeIntro: () => ctx.playWelcomeIntro(),
 		showError: message => ctx.showError(message),
+		usageLines: async (provider, id) => {
+			const authStorage = ctx.session.modelRegistry.authStorage;
+			const row = authStorage.listCredentials(provider, ctx.session.sessionId).find(candidate => candidate.id === id);
+			if (!row) return [`No usage data for #${id}.`];
+			const stored = authStorage.credentials.list(provider).find(entry => entry.id === id);
+			if (!stored) return [`No usage data for ${credentialName(row)} (#${id}).`];
+			let report;
+			try {
+				report = await authStorage.usage.report(provider, stored.credential, {
+					baseUrl: ctx.session.modelRegistry.getProviderBaseUrl(provider),
+					signal: AbortSignal.timeout(15_000),
+				});
+			} catch (error) {
+				return [`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`];
+			}
+			return usageReportLines(row, report);
+		},
+		resetStatus: async (provider, id) => {
+			const statuses = await ctx.session.listResetCredits(AbortSignal.timeout(10_000), provider);
+			const account = toResetUsageAccounts(statuses).find(candidate => candidate.target.credentialId === id);
+			if (!account) return undefined;
+			const lines = [account.label, `${account.availableCount} saved, ${account.redeemableCount} usable now`];
+			if (account.expiresAt) lines.push(`expires ${account.expiresAt}`);
+			if (account.unavailableReason) lines.push(account.unavailableReason);
+			if (account.error) lines.push(account.error);
+			const setting = provider === "anthropic" ? cfgClaudeResetsAutoRedeemByCredential : cfgCodexResetsAutoRedeemByCredential;
+			const raw = setting.get(ctx.settings)[String(id)];
+			const autoRedeem: "unset" | "yes" | "no" = raw === "yes" ? "yes" : raw === "no" ? "no" : "unset";
+			return { lines, redeemable: account.redeemableCount > 0, autoRedeem };
+		},
+		redeemReset: async (provider, id) => {
+			const statuses = await ctx.session.listResetCredits(AbortSignal.timeout(10_000), provider);
+			const account = toResetUsageAccounts(statuses).find(candidate => candidate.target.credentialId === id);
+			if (!account) return `No saved reset found for #${id}.`;
+			const outcome = await ctx.session.redeemResetCredit(account.target);
+			return describeRedeemOutcome(outcome, account.label);
+		},
+		setAutoRedeem: (provider, id, value) => {
+			const setting = provider === "anthropic" ? cfgClaudeResetsAutoRedeemByCredential : cfgCodexResetsAutoRedeemByCredential;
+			const current = setting.get(ctx.settings);
+			const key = String(id);
+			if (value === "unset") {
+				if (!(key in current)) return;
+				const next = { ...current };
+				delete next[key];
+				setting.set(ctx.settings, next);
+				return;
+			}
+			setting.set(ctx.settings, { ...current, [key]: value });
+		},
+		accountPolicy: (provider, id) => {
+			const authStorage = ctx.session.modelRegistry.authStorage;
+			const row = authStorage.listCredentials(provider, ctx.session.sessionId).find(candidate => candidate.id === id);
+			return row ? accountPolicyFor(ctx.settings, authStorage, row) : undefined;
+		},
+		saveAccountPolicy: (provider, id, policy) => {
+			const authStorage = ctx.session.modelRegistry.authStorage;
+			const row = authStorage.listCredentials(provider, ctx.session.sessionId).find(candidate => candidate.id === id);
+			if (!row) return `${provider} credential #${id} is no longer stored.`;
+			return saveAccountPolicy(ctx.settings, authStorage, row, policy);
+		},
+		forgetCredential: (provider, id) => {
+			const authStorage = ctx.session.modelRegistry.authStorage;
+			const row = authStorage.listCredentials(provider, ctx.session.sessionId).find(candidate => candidate.id === id);
+			if (row) forgetCredentialSettings(ctx.settings, authStorage, row);
+		},
 	};
 }
 

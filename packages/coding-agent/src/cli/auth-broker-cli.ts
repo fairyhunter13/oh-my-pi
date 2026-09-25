@@ -39,6 +39,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
 import { resolveCredentialTarget } from "../auth/credential-selector";
+import { forgetCredentialSettings } from "../auth/credential-settings";
+import { Settings } from "../config/settings";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
@@ -414,6 +416,7 @@ async function confirmCredentialRemoval(message: string, flags: AuthBrokerComman
 
 async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const authStorage = await AuthStorage.create(getAgentDbPath());
+	const settings = await Settings.loadIsolated();
 	try {
 		let providerArg = flags.provider;
 		if (!providerArg) {
@@ -458,6 +461,7 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			);
 		}
 
+		let changed = false;
 		for (const row of selected) {
 			const name = credentialDisplayName(row);
 			const confirmed = await confirmCredentialRemoval(`Remove ${name} (#${row.id}) from ${providerArg}?`, flags);
@@ -465,13 +469,16 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 				process.stdout.write(`Kept ${name} (#${row.id}).\n`);
 				continue;
 			}
+			forgetCredentialSettings(settings, authStorage, row);
 			const removed = await authStorage.removeCredential(providerArg, row.id);
+			changed = true;
 			process.stdout.write(
 				removed
 					? `Removed ${name} (#${row.id}) from ${providerArg}.\n`
 					: `${name} (#${row.id}) was already gone.\n`,
 			);
 		}
+		if (changed) await settings.flush();
 
 		const remaining = authStorage.listCredentials(providerArg);
 		if (remaining.length === 0) {

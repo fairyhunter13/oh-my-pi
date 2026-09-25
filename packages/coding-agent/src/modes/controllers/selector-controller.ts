@@ -70,6 +70,7 @@ import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import type { CredentialSummary } from "@oh-my-pi/pi-ai";
+import { forgetCredentialSettings } from "../../auth/credential-settings";
 import type { CredentialSelection } from "../../auth/credential-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { loadDailyActivity } from "../../stats/activity-client";
@@ -2067,6 +2068,7 @@ export class SelectorController {
 		try {
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
 			const sessionId = this.ctx.session.sessionId;
+			forgetCredentialSettings(this.ctx.settings, authStorage, target.row);
 			const removed = await authStorage.removeCredential(target.provider, target.row.id, { sessionId });
 			if (!removed) {
 				this.ctx.showError(
