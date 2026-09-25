@@ -70,8 +70,8 @@ import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import type { CredentialSummary } from "@oh-my-pi/pi-ai";
+import type { CredentialSelection } from "../../auth/credential-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-import { matchSessionPinSelector } from "../../slash-commands/helpers/session-pin";
 import { loadDailyActivity } from "../../stats/activity-client";
 import {
 	AUTO_THINKING,
@@ -117,14 +117,11 @@ import { createModelBrowserSource } from "../model-browser-source";
 import type { ModelPickerComponent as ModelPickerComponentType } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import type { OAuthSelectorComponent as OAuthSelectorComponentType } from "@oh-my-pi/pi-tui/overlays/oauth-selector";
 import { PluginSelectorComponent } from "@oh-my-pi/pi-tui/overlays/plugin-selector";
-import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
+import { type ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
 import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import { credentialName } from "@oh-my-pi/pi-tui/setup/scenes/credential-format";
-import {
-	SessionAccountSelectorComponent,
-	type SessionPinSelection,
-} from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -2294,7 +2291,7 @@ export class SelectorController {
 		});
 	}
 
-	#applySessionPinSelection(provider: string, providerName: string, selection: SessionPinSelection): void {
+	#applySessionPinSelection(provider: string, providerName: string, selection: CredentialSelection): void {
 		const session = this.ctx.session;
 		const authStorage = session.modelRegistry.authStorage;
 		if (selection.kind === "pool") {
@@ -2318,11 +2315,6 @@ export class SelectorController {
 			this.ctx.showStatus("Cannot pin an account while the session is streaming.");
 			return;
 		}
-		const provider = session.model?.provider;
-		if (!provider) {
-			this.ctx.showStatus("Select a model before pinning a provider account.");
-			return;
-		}
 		const authStorage = session.modelRegistry.authStorage;
 		this.ctx.showStatus("Loading provider credentials…", { dim: true });
 		try {
@@ -2333,43 +2325,46 @@ export class SelectorController {
 			);
 			return;
 		}
-		const { getOAuthProviders } = loadProviderAuthUi();
-		const providerInfo = getOAuthProviders().find(candidate => candidate.id === provider);
-		const providerName = providerInfo?.name ?? provider;
-		const rows = authStorage.listCredentials(provider, session.sessionId).filter(row => row.disabled === null);
+		const rows = authStorage.listCredentials(undefined, session.sessionId).filter(row => row.disabled === null);
 		if (rows.length === 0) {
-			const source = authStorage.keys.describe(provider, session.sessionId);
-			this.ctx.showStatus(
-				source
-					? `No stored credentials for ${providerName}. Current auth comes from ${source}.`
-					: `No stored credentials for ${providerName}. Use /login to add one.`,
-			);
+			this.ctx.showStatus("No stored credentials. Use /login to add one.");
 			return;
 		}
 
-		this.showSelector(done => {
-			const selector = new SessionAccountSelectorComponent(
-				providerName,
-				rows,
-				selection => {
-					done();
-					this.#applySessionPinSelection(provider, providerName, selection);
-				},
-				() => {
-					done();
-					this.ctx.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector };
+		const target = await this.pickCredential({
+			verb: "Pin to this session",
+			rows,
+			initialProvider: session.model?.provider,
+			newItem: { label: "Use the pool", description: "Pick again at the next request" },
 		});
+		if (!target) return;
+		const { getOAuthProviders } = loadProviderAuthUi();
+		const providerInfo = getOAuthProviders().find(candidate => candidate.id === target.provider);
+		const providerName = providerInfo?.name ?? target.provider;
+		this.#applySessionPinSelection(
+			target.provider,
+			providerName,
+			target.kind === "new" ? { kind: "pool" } : { kind: "row", row: target.row },
+		);
 	}
 
 	async showResetUsageSelector(): Promise<void> {
 		const session = this.ctx.session;
+		const authStorage = session.modelRegistry.authStorage;
+		const rows = authStorage
+			.listCredentials(undefined, session.sessionId)
+			.filter(row => row.disabled === null && (row.provider === "anthropic" || row.provider === "openai-codex"));
+		if (rows.length === 0) {
+			this.ctx.showStatus("No Claude or Codex account is stored. Use /login to add one.");
+			return;
+		}
+		const picked = await this.pickCredential({ verb: "Saved resets", rows });
+		if (!picked || picked.kind !== "row") return;
+
 		this.ctx.showStatus("Checking saved rate-limit resets…", { dim: true });
 		let statuses: ResetCreditAccountStatus[];
 		try {
-			statuses = await session.listResetCredits();
+			statuses = await session.listResetCredits(AbortSignal.timeout(10_000), picked.provider);
 		} catch (error) {
 			this.ctx.showError(
 				sanitizeText(
@@ -2381,33 +2376,27 @@ export class SelectorController {
 			);
 			return;
 		}
-		const accounts = toResetUsageAccounts(statuses);
-		if (accounts.length === 0) {
-			this.ctx.showStatus("No provider accounts found. Use /login to add one.");
-			return;
-		}
-		if (!accounts.some(account => account.availableCount > 0)) {
-			this.ctx.showStatus(
-				accounts.some(account => account.error)
-					? "No saved resets available — some accounts couldn't be reached (try /login)."
-					: "No saved rate-limit resets available to spend right now.",
+		const name = credentialName(picked.row);
+		const account = toResetUsageAccounts(statuses).find(candidate => candidate.target.credentialId === picked.row.id);
+		if (!account || account.error) {
+			this.ctx.showWarning(
+				account?.error
+					? `${name}: ${sanitizeText(account.error.replace(/[\r\n\t]+/g, " "))}`
+					: `No saved-reset status for ${name}.`,
 			);
 			return;
 		}
-		this.showSelector(done => {
-			const selector = new ResetUsageSelectorComponent(
-				accounts,
-				account => {
-					done();
-					void this.#redeemReset(account);
-				},
-				() => {
-					done();
-					this.ctx.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector };
-		});
+		const detailParts = [`${account.availableCount} saved`, `${account.redeemableCount} usable now`];
+		if (account.expiresAt) detailParts.push(`expires ${sanitizeText(account.expiresAt)}`);
+		const detail = detailParts.join(", ");
+		if (account.redeemableCount === 0) {
+			const reason = account.unavailableReason ? ` (${sanitizeText(account.unavailableReason)})` : "";
+			this.ctx.showStatus(`${name}: no saved reset usable now — ${detail}${reason}`);
+			return;
+		}
+		const confirmed = await this.ctx.showHookConfirm(`Spend 1 saved reset for ${name}?`, detail);
+		if (!confirmed) return;
+		await this.#redeemReset(account);
 	}
 
 	async #redeemReset(account: ResetUsageAccount): Promise<void> {
