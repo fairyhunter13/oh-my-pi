@@ -382,6 +382,8 @@ describe("setup wizard short terminals", () => {
 						credentials: { has: () => false },
 						keys: { source: () => undefined },
 					},
+					getAvailable: () => [],
+					getAll: () => [],
 				},
 			},
 			openInBrowser: () => {},

@@ -75,9 +75,39 @@ describe("PR 3318 repro", () => {
 			metadata: { email: "user@example.test", orgName: "free", orgId: "workspace-id", planType: "prolite\nforged" },
 			resetCredits: { availableCount: 1 },
 		};
-		const text = await buildUsageReportText({
-			session: { model: undefined, fetchUsageReports: async () => [report] },
-		} as never);
+		// ccw: /usage shows one credential at a time, so the report is reached through its row.
+		const row: CredentialSummary = {
+			id: 1,
+			provider: "openai-codex",
+			kind: "oauth",
+			label: null,
+			identity: "user@example.test",
+			org: null,
+			hint: null,
+			disabled: null,
+			isDefault: false,
+			active: false,
+			pinned: false,
+		};
+		const credential = { type: "oauth", access: "a", refresh: "r", expires: 0, email: "user@example.test" };
+		const text = await buildUsageReportText(
+			{
+				session: {
+					model: undefined,
+					sessionId: undefined,
+					fetchUsageReports: async () => [report],
+					modelRegistry: {
+						getProviderBaseUrl: () => undefined,
+						authStorage: {
+							listCredentials: () => [row],
+							credentials: { list: () => [{ id: row.id, provider: row.provider, credential }] },
+							usage: { providerFor: () => ({}), report: async () => report },
+						},
+					},
+				},
+			} as never,
+			"openai-codex/1",
+		);
 		expect(text).toContain("user@example.test · plan: prolite forged: 1 saved rate-limit reset");
 		expect(text).toContain("user@example.test · plan: prolite forged: 20.00% used");
 		expect(text).not.toContain("prolite\nforged");

@@ -176,7 +176,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: { getApiKey: async () => "test-key" } as never,
+			modelRegistry: {
+				getApiKey: async () => "test-key",
+				authStorage: { sessions: { adopt: () => {}, inherit: () => {} } },
+			} as never,
 			toolRegistry,
 			builtInToolNames: options.xdev && !options.lazyWrite ? ["read", "write"] : ["read"],
 			ensureWriteRegistered: async () => {
@@ -632,7 +635,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { authStorage: { sessions: { adopt: () => {}, inherit: () => {} } } } as never,
 			toolRegistry,
 			setActiveToolNames: names => {
 				activeToolNames.clear();
