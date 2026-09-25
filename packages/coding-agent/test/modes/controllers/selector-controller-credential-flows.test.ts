@@ -42,24 +42,28 @@ function pickedPool(provider: string): CredentialPickerTarget {
 function createCtx(session: Record<string, unknown>) {
 	const showStatus = vi.fn();
 	const showWarning = vi.fn();
-	const showHookConfirm = vi.fn(async (_title: string, _message: string) => true);
+	const showHookSelector = vi.fn(
+		async (_title: string, _options: string[]): Promise<string | undefined> => "Spend one",
+	);
 	const ctx = {
 		session,
 		showStatus,
 		showError: vi.fn(),
 		showWarning,
-		showHookConfirm,
+		showHookSelector,
 		statusLine: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() },
 	} as unknown as InteractiveModeContext;
-	return { ctx, showStatus, showWarning, showHookConfirm };
+	return { ctx, showStatus, showWarning, showHookSelector };
 }
 
 describe("SelectorController.showResetUsageSelector", () => {
 	const account = row({ id: 6, provider: "openai-codex", identity: "b@x" });
 
 	function makeSession(statuses: ResetCreditAccountStatus[], redeemOutcome?: ResetCreditRedeemOutcome) {
-		const redeemResetCredit = vi.fn(async (_target: ResetCreditTarget) => redeemOutcome ?? { ok: true, code: "reset" });
+		const redeemResetCredit = vi.fn(
+			async (_target: ResetCreditTarget) => redeemOutcome ?? { ok: true, code: "reset" },
+		);
 		return {
 			session: {
 				modelRegistry: { authStorage: { listCredentials: () => [account] } },
@@ -121,19 +125,20 @@ describe("SelectorController.showResetUsageSelector", () => {
 				active: false,
 			},
 		]);
-		const { ctx, showHookConfirm } = createCtx(session);
+		const { ctx, showHookSelector } = createCtx(session);
 		const controller = new SelectorController(ctx);
 		controller.pickCredential = vi.fn(async () => pickedRow("openai-codex", account));
 
 		await controller.showResetUsageSelector();
 
-		expect(showHookConfirm).toHaveBeenCalledTimes(1);
-		expect(showHookConfirm.mock.calls[0]?.[0]).toContain("Spend 1 saved reset for");
+		expect(showHookSelector).toHaveBeenCalledTimes(1);
+		expect(showHookSelector.mock.calls[0]?.[0]).toContain("Spend 1 saved reset for");
+		expect(showHookSelector.mock.calls[0]?.[1]).toEqual(["Spend one", "Cancel"]);
 		expect(redeemResetCredit).toHaveBeenCalledTimes(1);
 		expect(redeemResetCredit.mock.calls[0]?.[0]).toEqual({ provider: "openai-codex", credentialId: 6, email: "b@x" });
 	});
 
-	it("spends nothing when the confirm is declined", async () => {
+	it("spends nothing on Cancel or Esc", async () => {
 		const { session, redeemResetCredit } = makeSession([
 			{
 				provider: "openai-codex",
@@ -145,14 +150,15 @@ describe("SelectorController.showResetUsageSelector", () => {
 				active: false,
 			},
 		]);
-		const { ctx, showHookConfirm } = createCtx(session);
-		showHookConfirm.mockImplementation(async () => false);
+		const { ctx, showHookSelector } = createCtx(session);
+		showHookSelector.mockImplementationOnce(async () => "Cancel").mockImplementationOnce(async () => undefined);
 		const controller = new SelectorController(ctx);
 		controller.pickCredential = vi.fn(async () => pickedRow("openai-codex", account));
 
 		await controller.showResetUsageSelector();
+		await controller.showResetUsageSelector();
 
-		expect(showHookConfirm).toHaveBeenCalledTimes(1);
+		expect(showHookSelector).toHaveBeenCalledTimes(2);
 		expect(redeemResetCredit).not.toHaveBeenCalled();
 	});
 });

@@ -873,7 +873,7 @@ describe("resolveUsageCredential", () => {
 		expect(target as string).toContain("anthropic/");
 	});
 
-	it("accepts <provider>/<id> and rejects an unknown id", async () => {
+	it("resolves --credential in the shared selector grammar and refuses a non-match", async () => {
 		const storage = await makeStorage();
 		await storage.credentials.upsert("anthropic", {
 			type: "oauth",
@@ -882,20 +882,39 @@ describe("resolveUsageCredential", () => {
 			expires: Date.now() + 60_000,
 			email: "a@example.test",
 		});
+		await storage.credentials.upsert("anthropic", {
+			type: "oauth",
+			access: "access-b",
+			refresh: "refresh-b",
+			expires: Date.now() + 60_000,
+			email: "b@example.test",
+		});
 		await storage.credentials.reload();
-		const id = storage.listCredentials("anthropic")[0]!.id;
+		const id = storage.listCredentials("anthropic").find(row => row.identity === "a@example.test")!.id;
 
-		const ok = resolveUsageCredential(storage, `anthropic/${id}`);
-		if (typeof ok === "string") throw new Error(`expected a resolved credential, got: ${ok}`);
-		expect(ok.row.identity).toBe("a@example.test");
+		for (const selector of [`anthropic/${id}`, `anthropic/#${id}`, "anthropic/A@EXAMPLE.TEST"]) {
+			const ok = resolveUsageCredential(storage, selector);
+			if (typeof ok === "string") throw new Error(`${selector}: expected a resolved credential, got: ${ok}`);
+			expect(ok.row.id).toBe(id);
+		}
+		const bare = resolveUsageCredential(storage, `#${id}`, "anthropic");
+		if (typeof bare === "string") throw new Error(`expected a resolved credential, got: ${bare}`);
+		expect(bare.row.id).toBe(id);
 
 		const bad = resolveUsageCredential(storage, `anthropic/${id + 999}`);
-		expect(bad).toBe(`No stored credential matches "anthropic/${id + 999}".`);
+		expect(bad as string).toStartWith(`No anthropic credential matches "${id + 999}".`);
+		expect(bad as string).toContain(`[anthropic/${id}]`);
 
-		// C-1: Number.parseInt("5abc", 10) reads 5, silently selecting the
-		// wrong row on a typo — reject anything after the digits.
-		const typo = resolveUsageCredential(storage, `anthropic/${id}abc`);
-		expect(typo).toBe(`"anthropic/${id}abc" is not "<provider>/<credential id>" or "<provider>/none".`);
+		// C-1: a typo after the digits never selects the row the digits name.
+		expect(typeof resolveUsageCredential(storage, `anthropic/${id}abc`)).toBe("string");
+		expect(resolveUsageCredential(storage, "anthropic/pool") as string).toStartWith(
+			"No anthropic credential matches",
+		);
+		expect(resolveUsageCredential(storage, "anthropic/none") as string).toContain("only accepted by");
+		expect(resolveUsageCredential(storage, "anthropic/none", undefined, { allowNone: true })).toEqual({
+			provider: "anthropic",
+			credentialId: null,
+		});
 	});
 });
 

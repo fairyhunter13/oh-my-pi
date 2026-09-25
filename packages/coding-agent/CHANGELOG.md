@@ -29,6 +29,11 @@
 - Added `registerAgentBindings` to `ExtensionAPI`, letting an extension back the `/agents` hub's edit and credential-display surface instead of its native `config.yml` write.
 - Added one credential selector grammar, `<provider>/<active|pool|id|#id|label|email>`, used by every single-credential command and CLI flag: `/usage`, `/usage reset`, `/session pin`, `omp usage --credential`, `omp auth-broker logout --credential` (replacing `--account N`), and `omp token --credential` (replacing `--account N`, and now able to print an API key). `/usage reset` and `/session pin` now pick the credential through the same shared picker as `/login` and `/logout`, for any provider. Auto-redeem for saved rate-limit resets can now be answered per credential instead of per provider. `/providers` → Credentials gained per-row `Usage…`, `Saved resets…`, and (subscriptions only) `Priority and reserve…` actions; removing a credential now also forgets its per-credential settings.
 
+### Changed
+
+- `omp usage --credential` now takes the shared selector grammar (`#id`, label, email, `active`, or a bare selector with `--provider`); `<provider>/none` stays for `clients`.
+- The `/usage reset` confirm now offers `Spend one` and `Cancel`.
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

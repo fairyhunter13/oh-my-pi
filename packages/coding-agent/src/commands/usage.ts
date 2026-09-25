@@ -32,13 +32,13 @@ export default class Usage extends Command {
 		credential: Flags.string({
 			char: "c",
 			description:
-				"Credential to act on: <provider>/<id>, or <provider>/none for usage no stored credential produced (clients only)",
+				"Credential to act on: <provider>/<id|active|#id|label|email> (a bare selector with --provider), or <provider>/none for usage no stored credential produced (clients only)",
 		}),
 	};
 
 	static examples = [
 		"# Detailed usage breakdown for the one stored credential (asks when there is more than one)\n  omp usage",
-		"# A specific credential\n  omp usage --credential anthropic/3",
+		"# A specific credential, by id, label or email\n  omp usage --credential anthropic/3\n  omp usage --credential anthropic/work",
 		"# Only Anthropic accounts\n  omp usage --provider anthropic",
 		"# Redact account identifiers for screenshots\n  omp usage --redact",
 		"# Machine-readable output\n  omp usage --json",

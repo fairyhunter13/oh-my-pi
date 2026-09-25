@@ -2396,8 +2396,11 @@ export class SelectorController {
 			this.ctx.showStatus(`${name}: no saved reset usable now — ${detail}${reason}`);
 			return;
 		}
-		const confirmed = await this.ctx.showHookConfirm(`Spend 1 saved reset for ${name}?`, detail);
-		if (!confirmed) return;
+		const choice = await this.ctx.showHookSelector(`Spend 1 saved reset for ${name}? ${detail}`, [
+			"Spend one",
+			"Cancel",
+		]);
+		if (choice !== "Spend one") return;
 		await this.#redeemReset(account);
 	}
 

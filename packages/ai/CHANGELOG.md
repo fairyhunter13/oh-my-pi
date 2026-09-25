@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed capped Anthropic and Bedrock Claude requests with thinking enabled, including on-demand compaction, ending at `max_tokens` with no answer; every capped request now gets its effort's thinking budget on top of the requested output ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))
+### Added
+
+- Added a regression test for `AuthStorage.setAccountPolicies`: an `auth.accountPolicies` change applies to the live credential pool, and a list that fails validation leaves the previous policy in effect.
 
 ## [18.3.1] - 2026-09-25
 

@@ -36,6 +36,7 @@ import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-p
 import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
 
 import { cfgRetryUsageReservePct } from "../session/settings";
+import { resolveCredentialTarget } from "../auth/credential-selector";
 
 const BAR_WIDTH = 28;
 
@@ -927,10 +928,12 @@ export type UsageCredentialTarget =
 
 /**
  * Resolve the one credential the live view, `--history` and `clients` act
- * on: the `--credential <provider>/<id>` flag (or `<provider>/none`, only
- * when `allowNone` is set) when given, else the sole reportable candidate.
- * With more than one candidate and no flag, the string result is a "pick
- * one" message — the caller prints it to stderr and exits 2, never guesses.
+ * on: the `--credential` flag in the shared selector grammar
+ * (`<provider>/<id|active|#id|label|email>`, or a bare selector with
+ * `--provider`), or `<provider>/none` when `allowNone` is set. Disabled rows
+ * resolve too, so a named tombstone still shows. With no flag and more than
+ * one candidate, the string result is a "pick one" message — the caller
+ * prints it to stderr and exits 2, never guesses.
  */
 export function resolveUsageCredential(
 	authStorage: AuthStorage,
@@ -952,20 +955,23 @@ export function resolveUsageCredential(
 ): UsageCredentialTarget | string {
 	if (arg !== undefined) {
 		const slash = arg.indexOf("/");
-		if (slash < 0) return `"${arg}" is not "<provider>/<credential id>" or "<provider>/none".`;
-		const argProvider = arg.slice(0, slash).toLowerCase();
-		const idPart = arg.slice(slash + 1);
-		if (idPart === "none") {
+		if (
+			slash > 0 &&
+			arg
+				.slice(slash + 1)
+				.trim()
+				.toLowerCase() === "none"
+		) {
 			if (!options?.allowNone) {
 				return `"${arg}" is not valid here: "<provider>/none" is only accepted by \`omp usage clients\`.`;
 			}
-			return { provider: argProvider, credentialId: null };
+			return { provider: arg.slice(0, slash).toLowerCase(), credentialId: null };
 		}
-		if (!/^\d+$/.test(idPart)) return `"${arg}" is not "<provider>/<credential id>" or "<provider>/none".`;
-		const id = Number(idPart);
-		const row = authStorage.listCredentials(argProvider).find(entry => entry.id === id);
-		if (!row) return `No stored credential matches "${arg}".`;
-		return { provider: argProvider, row };
+		const resolved = resolveCredentialTarget(authStorage.listCredentials(), arg, { provider });
+		if (!resolved.ok) return resolved.message;
+		if (resolved.selection.kind !== "row") return "Name a credential as <provider>/<id|active|#id|label|email>.";
+		const row = resolved.selection.row;
+		return { provider: row.provider, row };
 	}
 	const wantedProvider = provider?.toLowerCase();
 	const candidates = authStorage
