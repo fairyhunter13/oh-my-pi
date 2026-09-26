@@ -1,6 +1,6 @@
 // Fork-split plan step 2 (R5): every mapping layer accepts every thinking level THINKING_LEVELS
 // defines -- the six efforts from core plus "off" and "auto" -- with no complaint, and step 12's
-// jev warning on a thinking: auto row whose judge role resolves to typesafe.
+// jev warning on a thinking: auto row whose judge role resolves to a native jev judge.
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import "../src/config/all-settings";
-import { resetSettingsForTest, Settings } from "../src/config/settings";
+import { resetSettingsForTest, Settings, settings } from "../src/config/settings";
 import type { ExtensionContext, ExtensionFactory } from "../src/extensibility/extensions";
 import { agentFile, makeAuthStorage, makeCtx, makePi, spawn } from "./helpers/agent-profile-harness";
 
@@ -141,56 +141,44 @@ describe("R5: every mapping layer accepts every thinking level", () => {
 	});
 });
 
-describe("step 12: thinking: auto warns when the judge role spends jev, and only then", () => {
-	it("an auto row with a typesafe judge role shows the warning in status and at apply", async () => {
-		const agentDir = tmp("agent-profile-thinking-auto-typesafe-");
-		process.env.PI_CODING_AGENT_DIR = agentDir;
-		writeFileSync(
-			join(agentDir, "ccw-agent-profiles.yml"),
-			"profiles:\n  auto-profile:\n    probe: { model: anthropic/claude-sonnet-5, thinking: auto }\n",
-		);
-		await Settings.init({ inMemory: true, agentDir });
-		const factory = await freshExtension();
-		const auth = makeAuthStorage();
-		const notices: string[] = [];
-		const parent = makePi(factory);
-		const parentCtx = makeCtx("parent", null, auth, notices, {
-			resolve: (spec: string) => (spec === "@judge" ? { provider: "typesafe", id: "jev-1" } : undefined),
-		});
-		await (parent.command!.handler as (a: string, c: ExtensionContext) => Promise<void>)("auto-profile", parentCtx);
-		expect(notices.some(note => note.includes("thinking auto classifies every turn through the judge role"))).toBe(
-			true,
-		);
+// The judge role's native model, in the catalog shape core's hasNativeJudge reads: a judgment
+// API and kind judge, reachable only through modelRegistry.getAvailable("all").
+const JEV = { provider: "typesafe", id: "jev-1.13.0", name: "jev", api: "typesafe", kind: "judge" };
+const WARNING = "thinking auto classifies every turn through the judge role";
 
-		await (parent.command!.handler as (a: string, c: ExtensionContext) => Promise<void>)("status", parentCtx);
-		expect(
-			parent.reports.some(
-				report => typeof report === "string" && report.includes("thinking auto classifies every turn"),
-			),
-		).toBe(true);
+async function autoWarnings(judge: string | undefined, registryModels: unknown[]): Promise<boolean[]> {
+	const agentDir = tmp("agent-profile-thinking-auto-");
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	writeFileSync(
+		join(agentDir, "ccw-agent-profiles.yml"),
+		"profiles:\n  auto-profile:\n    probe: { model: anthropic/claude-sonnet-5, thinking: auto }\n",
+	);
+	await Settings.init({ inMemory: true, agentDir });
+	if (judge) {
+		settings.setModelRole("judge", judge);
+	}
+	const factory = await freshExtension();
+	const notices: string[] = [];
+	const parent = makePi(factory);
+	const parentCtx = makeCtx("parent", null, makeAuthStorage(), notices, { registryModels });
+	await (parent.command!.handler as (a: string, c: ExtensionContext) => Promise<void>)("auto-profile", parentCtx);
+	await (parent.command!.handler as (a: string, c: ExtensionContext) => Promise<void>)("status", parentCtx);
+	return [
+		notices.some(note => note.includes(WARNING)),
+		parent.reports.some(report => typeof report === "string" && report.includes(WARNING)),
+	];
+}
+
+describe("step 12: thinking: auto warns when the judge role spends jev, and only then", () => {
+	it("an auto row with a native jev judge shows the warning at apply and in status", async () => {
+		expect(await autoWarnings("typesafe/jev-1.13.0", [JEV])).toEqual([true, true]);
 	});
 
 	it("with the judge role unset, an auto row shows no warning", async () => {
-		const agentDir = tmp("agent-profile-thinking-auto-unset-");
-		process.env.PI_CODING_AGENT_DIR = agentDir;
-		writeFileSync(
-			join(agentDir, "ccw-agent-profiles.yml"),
-			"profiles:\n  auto-profile:\n    probe: { model: anthropic/claude-sonnet-5, thinking: auto }\n",
-		);
-		await Settings.init({ inMemory: true, agentDir });
-		const factory = await freshExtension();
-		const auth = makeAuthStorage();
-		const notices: string[] = [];
-		const parent = makePi(factory);
-		const parentCtx = makeCtx("parent", null, auth, notices, { resolve: () => undefined });
-		await (parent.command!.handler as (a: string, c: ExtensionContext) => Promise<void>)("auto-profile", parentCtx);
-		expect(notices.some(note => note.includes("thinking auto classifies every turn"))).toBe(false);
+		expect(await autoWarnings(undefined, [])).toEqual([false, false]);
+	});
 
-		await (parent.command!.handler as (a: string, c: ExtensionContext) => Promise<void>)("status", parentCtx);
-		expect(
-			parent.reports.some(
-				report => typeof report === "string" && report.includes("thinking auto classifies every turn"),
-			),
-		).toBe(false);
+	it("with a chat model as the judge, an auto row shows no warning", async () => {
+		expect(await autoWarnings("anthropic/claude-haiku-4-5", [JEV])).toEqual([false, false]);
 	});
 });

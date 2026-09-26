@@ -75,8 +75,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { spawnGrantPreCheck, spendSpawn } from "./spawn-grant";
-import type { Model } from "@oh-my-pi/pi-ai";
-import { formatModelRoleAlias } from "../config/model-roles";
+import { hasNativeJudge } from "../judgment";
 
 // This fork's own agent dir: PI_CODING_AGENT_DIR moves it, so a sandbox never reads the real
 // files.
@@ -496,25 +495,23 @@ const clampLevel = (efforts: string[], level: string): string | undefined => {
 	return below ?? efforts[0];
 };
 
-const JUDGE_ROLE_ALIAS = formatModelRoleAlias("judge");
-
 // jev is spent only where a decision needs it (knowledge/decisions/jev-is-spent-only-where-
 // the-evidence-leaves-a-decision-open.md). Under thinking: auto, session/model-controls.ts
 // classifies every turn through the judge role, so a row bound to auto spends jev on each
-// child turn once the judge role resolves to typesafe -- with no decision behind any one of
-// them. This warns, but the row still binds: the level still works, and an operator may want
-// the classification anyway.
+// child turn once that role resolves to a native judge -- with no decision behind any one of
+// them. This warns, but the row still binds. hasNativeJudge is core's own test: a judgment
+// model is not a chat model, so ctx.models.resolve("@judge") never finds it.
 const autoThinkingWarning = (ctx: ExtensionContext, agent: string, thinking: unknown): string | null => {
 	if (thinking !== AUTO_THINKING) {
 		return null;
 	}
-	let judge: Model | undefined;
+	let native = false;
 	try {
-		judge = ctx.models.resolve(JUDGE_ROLE_ALIAS);
+		native = hasNativeJudge(settings, ctx.modelRegistry);
 	} catch {
-		judge = undefined;
+		native = false;
 	}
-	if (judge?.provider !== "typesafe") {
+	if (!native) {
 		return null;
 	}
 	return (

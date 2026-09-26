@@ -220,9 +220,9 @@ export interface FakeCtxOptions {
 	entries?: unknown[];
 	branch?: unknown[];
 	authStorage?: FakeAuthStorage;
-	// Overrides ctx.models.resolve entirely; needed for a role alias ("@judge"), which the
-	// default lookup below (a plain id/provider match) does not understand.
-	resolve?: (pattern: string) => unknown;
+	// Extra rows for modelRegistry.getAvailable("all"), where a judgment model lives: it is not a
+	// chat model, so ctx.models never lists it.
+	registryModels?: unknown[];
 }
 
 // The shape before_subagent_spawn hands the hook.
@@ -282,9 +282,6 @@ export const makeCtx = (
 		},
 		models: {
 			resolve: (pattern: string) => {
-				if (options.resolve) {
-					return options.resolve(pattern);
-				}
 				const base = String(pattern).split(":")[0];
 				if (!base.includes("/")) {
 					return MODELS.find(model => model.id.includes(base));
@@ -297,5 +294,9 @@ export const makeCtx = (
 			},
 			list: () => MODELS,
 		},
-		modelRegistry: { authStorage, getAll: () => MODELS },
+		modelRegistry: {
+			authStorage,
+			getAll: () => MODELS,
+			getAvailable: () => [...MODELS, ...(options.registryModels ?? [])],
+		},
 	}) as unknown as ExtensionContext;
