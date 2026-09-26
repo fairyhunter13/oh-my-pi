@@ -76,10 +76,15 @@ let agentDir: string;
 let repoDir: string;
 let repoCwd: string;
 
+// The module specifier is fixed; the query string is the runtime-selected part, forcing a fresh
+// module instance per call the way a real process restart would -- a static import cannot re-run
+// a module already in the cache.
 async function freshExtension(): Promise<ExtensionFactory> {
 	const mod = (await import(`../src/agent-profile/index.ts?t=${Math.random()}`)) as {
 		createAgentProfileExtension: ExtensionFactory;
+		setBuiltinProfilesForTest: (yaml: string | undefined) => void;
 	};
+	mod.setBuiltinProfilesForTest(BUILTIN_YAML);
 	return mod.createAgentProfileExtension;
 }
 
@@ -98,7 +103,6 @@ beforeEach(async () => {
 	repoCwd = join(repoDir, "src");
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 
-	writeFileSync(join(agentDir, "agent-profiles.builtin.yml"), BUILTIN_YAML);
 	writeFileSync(join(agentDir, "ccw-agent-profiles.yml"), HAND_PROFILES + HAND_ASSIGN);
 
 	mkdirSync(repoCwd, { recursive: true });

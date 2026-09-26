@@ -1,8 +1,8 @@
 // D1-D3, O1: default application (built-in default, session state, OMP_AGENT_PROFILE, off), and
-// the built-in profiles the fork reads from agent-profiles.builtin.yml. Ported from ccw's
+// the built-in profiles the extension embeds from builtin-profiles.yml. Ported from ccw's
 // internal/policy/omp_test.go (claude-code-workflows), which ran the same scenario as one
-// embedded JS harness against a hardcoded BUILTIN object; here the built-ins come from a fixture
-// file, matching the ported contract.
+// embedded JS harness against a hardcoded BUILTIN object; setBuiltinProfilesForTest here plays
+// the same fixture role, on the freshly imported module instance each test runs against.
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,10 +41,15 @@ profiles:
 
 let agentDir: string;
 
-async function freshExtension(): Promise<ExtensionFactory> {
+// The module specifier is fixed; the query string is the runtime-selected part, forcing a fresh
+// module instance (fresh APPLIED_PROFILE, fresh builtin-yaml override) per call the way a real
+// process restart would -- a static import cannot re-run a module already in the cache.
+async function freshExtension(builtinYaml: string | undefined): Promise<ExtensionFactory> {
 	const mod = (await import(`../src/agent-profile/index.ts?t=${Math.random()}`)) as {
 		createAgentProfileExtension: ExtensionFactory;
+		setBuiltinProfilesForTest: (yaml: string | undefined) => void;
 	};
+	mod.setBuiltinProfilesForTest(builtinYaml);
 	return mod.createAgentProfileExtension;
 }
 
@@ -63,9 +68,8 @@ afterEach(() => {
 
 describe("D1-D3: default application", () => {
 	it("D1: with no state entry and no OMP_AGENT_PROFILE, a fresh session applies the built-in default and never records it", async () => {
-		writeFileSync(join(agentDir, "agent-profiles.builtin.yml"), BUILTIN_YAML);
 		delete process.env.OMP_AGENT_PROFILE;
-		const factory = await freshExtension();
+		const factory = await freshExtension(BUILTIN_YAML);
 		const auth = makeAuthStorage();
 		const notices: string[] = [];
 		const pi = makePi(factory);
@@ -82,9 +86,8 @@ describe("D1-D3: default application", () => {
 	});
 
 	it("D2: each of the five bundled agents spawns on the default's row", async () => {
-		writeFileSync(join(agentDir, "agent-profiles.builtin.yml"), BUILTIN_YAML);
 		delete process.env.OMP_AGENT_PROFILE;
-		const factory = await freshExtension();
+		const factory = await freshExtension(BUILTIN_YAML);
 		const auth = makeAuthStorage();
 		const notices: string[] = [];
 		const pi = makePi(factory);
@@ -107,9 +110,8 @@ describe("D1-D3: default application", () => {
 	});
 
 	it("D3: /agent-profile off, recorded on a branch, beats the built-in default there", async () => {
-		writeFileSync(join(agentDir, "agent-profiles.builtin.yml"), BUILTIN_YAML);
 		delete process.env.OMP_AGENT_PROFILE;
-		const factory = await freshExtension();
+		const factory = await freshExtension(BUILTIN_YAML);
 		const auth = makeAuthStorage();
 		const notices: string[] = [];
 		const pi = makePi(factory);
@@ -125,9 +127,9 @@ describe("D1-D3: default application", () => {
 	});
 
 	it("no builtin file: no default is applied and no spawn is refused (contract)", async () => {
-		// No agent-profiles.builtin.yml written at all.
+		// No built-in text set: setBuiltinProfilesForTest("") plays no file at all.
 		delete process.env.OMP_AGENT_PROFILE;
-		const factory = await freshExtension();
+		const factory = await freshExtension("");
 		const auth = makeAuthStorage();
 		const notices: string[] = [];
 		const pi = makePi(factory);
@@ -148,8 +150,7 @@ describe("D1-D3: default application", () => {
 
 describe("O1: built-in profiles", () => {
 	it("opus runs the judges at xhigh and every other agent at medium", async () => {
-		writeFileSync(join(agentDir, "agent-profiles.builtin.yml"), BUILTIN_YAML);
-		const factory = await freshExtension();
+		const factory = await freshExtension(BUILTIN_YAML);
 		const auth = makeAuthStorage();
 		const notices: string[] = [];
 		const pi = makePi(factory);
@@ -166,12 +167,11 @@ describe("O1: built-in profiles", () => {
 	});
 
 	it("a custom profile of the same name overrides the built-in", async () => {
-		writeFileSync(join(agentDir, "agent-profiles.builtin.yml"), BUILTIN_YAML);
 		writeFileSync(
 			join(agentDir, "ccw-agent-profiles.yml"),
 			"profiles:\n  tiered:\n    scout: { model: deepseek/deepseek-flash, thinking: off }\n",
 		);
-		const factory = await freshExtension();
+		const factory = await freshExtension(BUILTIN_YAML);
 		const auth = makeAuthStorage();
 		const notices: string[] = [];
 		const pi = makePi(factory);

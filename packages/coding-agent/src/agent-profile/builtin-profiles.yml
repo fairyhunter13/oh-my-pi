@@ -1,0 +1,54 @@
+# The built-in /agent-profile profiles. Custom profiles go in ~/.omp/agent/ccw-agent-profiles.yml,
+# and a profile there with the same name overrides one here.
+#
+# Every built-in names ONE provider on purpose. A profile that names a provider with no working
+# credential does not fail: omp silently runs the child on the parent's model. So a fleet default
+# never names a provider the fleet may not hold. No account is named, so each profile works with
+# one subscription or several. Every built-in binds all five bundled agents, because an applied
+# profile refuses an agent it leaves out. Every level is one the catalog lists for its model
+# (Haiku 4.5 minimal..xhigh, Sonnet 5 and Opus 5.5 low..max), so none is clamped.
+
+# Applied to every session with no state entry and no OMP_AGENT_PROFILE. /agent-profile off
+# records "off" on the branch, which beats this.
+defaultProfile: tiered
+
+# A model id (after provider/) matching any pattern needs a user-confirmed spawn grant.
+expensiveModels:
+  - "claude-opus"
+  - "claude-fable"
+  - "claude-mythos"
+  - "(^|/)deepseek-v4-pro"
+  - "(^|[/.])kimi-k3"
+  - "(^|[/.-])glm-5[.-]3(-prime)?(:thinking)?$"
+
+descriptions:
+  opus: "Every delegated agent on Claude Opus 5.5: the judges at xhigh, every other agent at medium"
+  tiered: "The default: Haiku scouts and mechanical work, Sonnet writes and plans, Opus at medium does critical work, Opus at xhigh judges"
+  frugal: "Cheapest tiers throughout, to conserve a 5-hour limit"
+
+profiles:
+  # Every agent on Opus 5.5. The two judges run xhigh, because a missed defect reads as green.
+  # Every other agent runs medium, the ceiling for a writer.
+  opus:
+    scout: { model: anthropic/claude-opus-5-5, thinking: medium }
+    sonic: { model: anthropic/claude-opus-5-5, thinking: medium }
+    task: { model: anthropic/claude-opus-5-5, thinking: medium }
+    reviewer: { model: anthropic/claude-opus-5-5, thinking: xhigh }
+    security-reviewer: { model: anthropic/claude-opus-5-5, thinking: xhigh }
+  # Graded by what a mistake costs. A reviewer that misses a defect reports the same green as one
+  # that found nothing, so the judges run Opus at xhigh. Sonnet writes and plans. Haiku scouts and
+  # does mechanical work, whose mistakes show up in a diff. prewalk and advisor are off by name:
+  # an advisor runs a second session, and a prewalk hands the edits to Haiku.
+  tiered:
+    scout: { model: anthropic/claude-haiku-4-5, thinking: low, prewalk: "off", advisor: "off" }
+    sonic: { model: anthropic/claude-haiku-4-5, thinking: "off", prewalk: "off", advisor: "off" }
+    task: { model: anthropic/claude-sonnet-5, thinking: medium, prewalk: "off", advisor: "off" }
+    reviewer: { model: anthropic/claude-opus-5-5, thinking: xhigh, prewalk: "off", advisor: "off" }
+    security-reviewer: { model: anthropic/claude-opus-5-5, thinking: xhigh, prewalk: "off", advisor: "off" }
+  # The cheap tiers, for a batch of mechanical edits where a bad diff is cheap to redo.
+  frugal:
+    scout: { model: anthropic/claude-haiku-4-5, thinking: low }
+    sonic: { model: anthropic/claude-haiku-4-5, thinking: "off" }
+    task: { model: anthropic/claude-haiku-4-5, thinking: medium }
+    reviewer: { model: anthropic/claude-sonnet-5, thinking: high }
+    security-reviewer: { model: anthropic/claude-sonnet-5, thinking: high }

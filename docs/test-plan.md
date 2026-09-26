@@ -342,6 +342,7 @@ Scenario: S-23 ccw's credential checks run as fork tests
 | T-52 | the built-in mailbox delivers only safe mail as agent messages | S-21 | D-MAIL | done | `packages/coding-agent/test/mailbox-extension.test.ts` | 20 | E1 |
 | T-53 | deadlines per basis, a disabled cause, a rotating provider and an empty store | S-22 | D-DEADLINE | done | `packages/coding-agent/test/auth-broker-deadlines.test.ts` | 12 | E1 |
 | T-54 | ccw's 21 credential checks, under their selftest titles | S-23 | D-C1, D-B5, D-C6 | done | `packages/ai/test/ccw-credentials.test.ts` | 20 | E1 |
+| T-55 | built-in profiles bind every bundled agent at a level its model lists, and the expensive list names the flagships only | S-18 | D-B | done | `packages/coding-agent/test/agent-profile-builtin.test.ts` | 12 | E1 |
 
 The node ID is the test file path, because bun has no collect-only listing.
 
