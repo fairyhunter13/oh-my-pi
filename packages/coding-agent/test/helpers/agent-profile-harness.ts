@@ -3,6 +3,10 @@
 // shapes; only the model catalog and the auth store are fakes, matching the original.
 import type { ExtensionAPI, ExtensionContext } from "../../src/extensibility/extensions";
 
+// One agent file, in the frontmatter shape this fork parses.
+export const agentFile = (name: string, description: string): string =>
+	"---\nname: " + name + "\ndescription: " + description + "\n---\nBody.\n";
+
 export const oauth = (id: number, provider: string, identity: string, extra: Record<string, unknown> = {}) => ({
 	id,
 	provider,
@@ -98,7 +102,12 @@ export interface FakeAuthStorage {
 	keys: { describe: (provider: string, sessionId?: string) => string | undefined };
 }
 
-export const makeAuthStorage = (credentials = CREDENTIALS): FakeAuthStorage => {
+// A fresh copy every call: CREDENTIALS is one module-level array shared by every test file in
+// the same bun test process, and a test that labels, disables or splices a row (G4, K5, L1-L6)
+// must never leak that mutation into a sibling file's run.
+export const makeAuthStorage = (
+	credentials: typeof CREDENTIALS = CREDENTIALS.map(row => ({ ...row })),
+): FakeAuthStorage => {
 	const sticky: Record<string, number> = {};
 	const pins: FakeAuthStorage["pins"] = [];
 	return {
@@ -194,7 +203,7 @@ export interface FakeCtxOptions {
 	cwd?: string;
 	mode?: string;
 	idle?: boolean;
-	select?: (title: string, choices: unknown[]) => Promise<unknown>;
+	select?: (title: string, choices: { label: string; description?: string }[]) => Promise<unknown>;
 	model?: (typeof MODELS)[number];
 	entries?: unknown[];
 	branch?: unknown[];
@@ -245,7 +254,7 @@ export const makeCtx = (
 			},
 			setStatus: () => {},
 			select: async (title: string, choices: unknown[]) =>
-				options.select ? options.select(title, choices) : undefined,
+				options.select ? options.select(title, choices as { label: string; description?: string }[]) : undefined,
 			input: async () => undefined,
 			editor: async (_title: string, text: string) => text,
 		},
