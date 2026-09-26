@@ -2653,7 +2653,6 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 			ctx,
 			agent,
 			typeof (r as any)?.model === "string" ? (r as any).model : (event.patterns?.[0] ?? ""),
-			bindingOf(ctx, agent),
 			expensiveModelPatterns(),
 		);
 		return refusal ?? r;
@@ -2669,8 +2668,7 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 		const rawTasks: any[] = Array.isArray((event.input as any)?.tasks) ? (event.input as any).tasks : [];
 		const candidates = (rawTasks.length > 0 ? rawTasks : [{}]).map(task => {
 			const agent = (typeof task?.agent === "string" && task.agent.trim()) || DEFAULT_SPAWN_AGENT;
-			const binding = bindingOf(ctx, agent);
-			return { agent, pattern: binding?.pattern ?? "", binding };
+			return { agent, pattern: bindingOf(ctx, agent)?.pattern ?? "" };
 		});
 		return spawnGrantPreCheck(ctx, candidates, expensiveModelPatterns());
 	});

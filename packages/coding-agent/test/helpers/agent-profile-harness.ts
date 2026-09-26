@@ -223,6 +223,8 @@ export interface FakeCtxOptions {
 	// Extra rows for modelRegistry.getAvailable("all"), where a judgment model lives: it is not a
 	// chat model, so ctx.models never lists it.
 	registryModels?: unknown[];
+	// Replaces ctx.models.list(), for a test that needs a priced catalog.
+	listModels?: unknown[];
 }
 
 // The shape before_subagent_spawn hands the hook.
@@ -292,7 +294,7 @@ export const makeCtx = (
 					MODELS.find(model => model.provider === provider);
 				return row ? { ...row, id } : undefined;
 			},
-			list: () => MODELS,
+			list: () => options.listModels ?? MODELS,
 		},
 		modelRegistry: {
 			authStorage,

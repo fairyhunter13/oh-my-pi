@@ -44,7 +44,7 @@ Named exclusion: upstream behavior that these commits do not touch. Upstream's o
 |D-STATS|stats count each provider request once, per credential|
 |D-B|rules B-1 to B-8: a bound subagent runs its row's model, level and account, or is refused|
 |D-G|rules G-1 to G-4 and the repo layers: which file binds an agent, and in what order|
-|D-GRANT|`claude-code-workflows/knowledge/decisions/a-subagent-spawns-only-on-a-user-confirmed-count.md`: 3 cheap spawns per user prompt are free, the rest spend a user-confirmed grant|
+|D-GRANT|`claude-code-workflows/knowledge/decisions/a-subagent-spawns-only-on-a-user-confirmed-count.md`: 4 cheap spawns per user prompt are free, the rest spend a user-confirmed grant, and only the model decides expensive|
 |D-MAIL|`claude-code-workflows/knowledge/decisions/sessions-mail-each-other-through-a-private-maildir.md`|
 |D-DEADLINE|`claude-code-workflows/knowledge/decisions/an-account-picker-is-provider-generic-but-its-deadlines-are-not.md`: the three deadline tiers|
 |D-JEV|`claude-code-workflows/knowledge/decisions/jev-is-spent-only-where-the-evidence-leaves-a-decision-open.md`|
@@ -250,8 +250,8 @@ Scenario: S-19 every mapping layer takes every thinking level
 Scenario: S-20 a spawn spends the grant by its tier
   Given a user prompt, a grant or none, and each task's own binding
   When the session spawns subagents
-  Then 3 cheap spawns run free, and a fourth or an expensive one spends the grant or is refused before it starts
-  And the system holds that a new user prompt refills the free 3 and a subagent never spawns
+  Then 4 cheap spawns run free, and a fifth or an expensive model spends the grant or is refused before it starts
+  And the system holds that a new user prompt refills the free 4, a thinking level or an API key never makes a cheap model expensive, and a subagent never spawns
 ```
 
 ### S-21: the built-in mailbox delivers only safe mail
@@ -338,7 +338,7 @@ Scenario: S-23 ccw's credential checks run as fork tests
 | T-48 | repo scope discovery (H2-H5, G-1, K5f, L4b-d) | S-18 | D-G | done | `packages/coding-agent/test/agent-profile-scope.test.ts` | 12 | E1 |
 | T-49 | a task child binds the built-in extension too | S-18 | D-B | done | `packages/coding-agent/test/agent-profile-child-propagation.test.ts` | 20 | E1 |
 | T-50 | every thinking level binds in every layer, and an auto row warns on a typesafe judge | S-19 | D-G, D-JEV | done | `packages/coding-agent/test/agent-profile-thinking.test.ts` | 12 | E1 |
-| T-51 | 3 cheap spawns are free, an expensive one or a fourth spends the grant | S-20 | D-GRANT | done | `packages/coding-agent/test/agent-profile-spawn-grant.test.ts` | 20 | E1 |
+| T-51 | 4 cheap spawns are free, and an expensive model (a flagship, priced at or above Opus, or its provider's most expensive) or a fifth spends the grant | S-20 | D-GRANT | done | `packages/coding-agent/test/agent-profile-spawn-grant.test.ts` | 20 | E1 |
 | T-52 | the built-in mailbox delivers only safe mail as agent messages | S-21 | D-MAIL | done | `packages/coding-agent/test/mailbox-extension.test.ts` | 20 | E1 |
 | T-53 | deadlines per basis, a disabled cause, a rotating provider and an empty store | S-22 | D-DEADLINE | done | `packages/coding-agent/test/auth-broker-deadlines.test.ts` | 12 | E1 |
 | T-54 | ccw's 21 credential checks, under their selftest titles | S-23 | D-C1, D-B5, D-C6 | done | `packages/ai/test/ccw-credentials.test.ts` | 20 | E1 |

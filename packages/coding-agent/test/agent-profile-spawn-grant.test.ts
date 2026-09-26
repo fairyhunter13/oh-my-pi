@@ -1,7 +1,7 @@
-// The spawn grant built into agent-profile: 3 cheap subagents per user prompt run freely, and a
-// fourth or any expensive one spends a user-confirmed grant. The first describe ports ccw's
-// internal/policy/omp_spawn_grant_test.go (claude-code-workflows), where every spawn ran on the
-// parent's Opus and so always needed the grant.
+// The spawn grant built into agent-profile: 4 cheap subagents per user prompt run freely, and a
+// fifth or any expensive one spends a user-confirmed grant. Only the model decides the tier. The
+// first describe ports ccw's internal/policy/omp_spawn_grant_test.go (claude-code-workflows),
+// where every spawn ran on the parent's Opus and so always needed the grant.
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -257,19 +257,17 @@ describe("the grant, ported: a spawn on the parent's Opus always needs it", () =
 	});
 });
 
-describe("tiers: 3 cheap spawns are free, an expensive one needs the grant", () => {
-	it("3 cheap scouts run with no grant, and the 4th is refused with more than 3", async () => {
+describe("tiers: 4 cheap spawns are free, an expensive one needs the grant", () => {
+	it("4 cheap scouts run with no grant, and the 5th is refused with more than 4", async () => {
 		const s = await session([user("go")], { model: HAIKU });
-		expect(call(s, [{}, {}, {}])).toBe("allow");
-		expect(call(s, [{}, {}, {}, {}])).toContain("more than 3 subagents in one user turn");
-		expect([spawn(s, "scout", HAIKU_LOW), spawn(s, "scout", HAIKU_LOW), spawn(s, "scout", HAIKU_LOW)]).toEqual([
-			"allow",
-			"allow",
-			"allow",
-		]);
-		const fourth = spawn(s, "scout", HAIKU_LOW);
-		expect(fourth).toContain("more than 3 subagents in one user turn");
-		expect(fourth).toContain(NONE);
+		expect(call(s, [{}, {}, {}, {}])).toBe("allow");
+		expect(call(s, [{}, {}, {}, {}, {}])).toContain("more than 4 subagents in one user turn");
+		for (let i = 0; i < 4; i++) {
+			expect(spawn(s, "scout", HAIKU_LOW)).toBe("allow");
+		}
+		const fifth = spawn(s, "scout", HAIKU_LOW);
+		expect(fifth).toContain("more than 4 subagents in one user turn");
+		expect(fifth).toContain(NONE);
 	});
 
 	it("an Opus reviewer as the first spawn is refused as expensive", async () => {
@@ -280,9 +278,9 @@ describe("tiers: 3 cheap spawns are free, an expensive one needs the grant", () 
 		expect(call(s, [{ agent: "reviewer" }])).toContain("expensive subagent");
 	});
 
-	it("a deepseek-flash row at high is refused for its level, and a stored API key for its billing", async () => {
+	it("a cheap model runs free at a high thinking level and on a stored API key", async () => {
 		const tier = await session([user("go")], { model: HAIKU, profile: "tier" });
-		expect(spawn(tier, "sonic")).toContain("(thinking level high)");
+		expect(spawn(tier, "sonic")).toBe("allow");
 		expect(spawn(tier, "scout")).toBe("allow");
 
 		const credentials = [
@@ -290,45 +288,108 @@ describe("tiers: 3 cheap spawns are free, an expensive one needs the grant", () 
 			apiKey(13, "anthropic", "…k13", { label: "metered" }),
 		] as typeof CREDENTIALS;
 		const keyed = await session([user("go")], { model: HAIKU, profile: "keyed", credentials });
-		expect(spawn(keyed, "task")).toContain("(pay-per-token key)");
+		expect(spawn(keyed, "task")).toBe("allow");
 	});
 
-	it("Approve 1 covers 3 cheap and 1 Opus in one batch, and a 5th Opus is refused", async () => {
+	it("Approve 1 covers 4 cheap and 1 Opus in one batch, and a 6th Opus is refused", async () => {
 		const s = await session([user("go"), ...approve(1)], { model: HAIKU, profile: "tier" });
-		expect(call(s, [{ agent: "scout" }, { agent: "scout" }, { agent: "scout" }, { agent: "reviewer" }])).toBe(
-			"allow",
-		);
-		expect([spawn(s, "scout"), spawn(s, "scout"), spawn(s, "scout"), spawn(s, "reviewer")]).toEqual([
-			"allow",
-			"allow",
-			"allow",
-			"allow",
-		]);
-		const fifth = spawn(s, "reviewer");
-		expect(fifth).toContain("expensive subagent");
-		expect(fifth).toContain(NONE);
+		const batch = [
+			{ agent: "scout" },
+			{ agent: "scout" },
+			{ agent: "scout" },
+			{ agent: "scout" },
+			{ agent: "reviewer" },
+		];
+		expect(call(s, batch)).toBe("allow");
+		expect([
+			spawn(s, "scout"),
+			spawn(s, "scout"),
+			spawn(s, "scout"),
+			spawn(s, "scout"),
+			spawn(s, "reviewer"),
+		]).toEqual(["allow", "allow", "allow", "allow", "allow"]);
+		const sixth = spawn(s, "reviewer");
+		expect(sixth).toContain("expensive subagent");
+		expect(sixth).toContain(NONE);
 	});
 
-	it("a new user prompt refills the free 3", async () => {
+	it("a new user prompt refills the free 4", async () => {
 		const s = await session([user("go")], { model: HAIKU });
-		for (let i = 0; i < 3; i++) {
+		for (let i = 0; i < 4; i++) {
 			expect(spawn(s, "scout", HAIKU_LOW)).toBe("allow");
 		}
-		expect(spawn(s, "scout", HAIKU_LOW)).toContain("more than 3");
+		expect(spawn(s, "scout", HAIKU_LOW)).toContain("more than 4");
 		s.entries.push(user("next"));
-		for (let i = 0; i < 3; i++) {
+		for (let i = 0; i < 4; i++) {
 			expect(spawn(s, "scout", HAIKU_LOW)).toBe("allow");
 		}
-		expect(spawn(s, "scout", HAIKU_LOW)).toContain("more than 3");
+		expect(spawn(s, "scout", HAIKU_LOW)).toContain("more than 4");
 	});
 
-	it("two Anthropic subscriptions and one DeepSeek key in one mapping: each task is classified by its own row", async () => {
+	it("two Anthropic subscriptions and one DeepSeek key in one mapping: every cheap row runs free", async () => {
 		const s = await session([user("go")], { model: HAIKU, profile: "fleet" });
 		expect(spawn(s, "task")).toBe("allow");
 		expect(spawn(s, "scout")).toBe("allow");
-		expect(spawn(s, "sonic")).toContain("sonic runs deepseek/deepseek-flash:off (pay-per-token key)");
-		expect(call(s, [{ agent: "task" }])).toBe("allow");
-		expect(call(s, [{ agent: "sonic" }])).toContain("pay-per-token key");
+		expect(spawn(s, "sonic")).toBe("allow");
+		expect(call(s, [{ agent: "sonic" }])).toBe("allow");
+	});
+});
+
+// Prices from packages/catalog/src/models.json on 2026-09-26, in $/1M tokens.
+const priced = (provider: string, id: string, input: number, output: number) => ({
+	provider,
+	id,
+	cost: { input, output, cacheRead: 0, cacheWrite: 0 },
+});
+const CATALOG = [
+	priced("anthropic", "claude-opus-5-5", 4, 20),
+	priced("anthropic", "claude-haiku-4-5", 0.25, 1.25),
+	priced("deepseek", "deepseek-flash", 0.3, 1.2),
+	priced("deepseek", "deepseek-v4-pro", 1.32, 3.96),
+	priced("deepseek-alt", "deepseek-flash", 0.3, 1.2),
+	priced("deepseek-alt", "deepseek-v4-pro", 1.32, 3.96),
+	priced("moonshot", "kimi-k2.7-code", 1.9, 8),
+	priced("moonshot", "kimi-k3", 3, 15),
+	priced("zai", "glm-5-flash", 0.1, 0.4),
+	priced("zai", "glm-5.2", 1.4, 4.4),
+	priced("zai", "glm-5.3", 1.4, 4.4),
+	priced("openrouter", "moonshotai/kimi-k2.7-code", 1.9, 8),
+	priced("openrouter", "moonshotai/kimi-k3", 3, 15),
+	priced("openrouter", "openai/gpt-5.5-pro", 30, 180),
+	priced("local", "a", 0, 0),
+	priced("local", "b", 0, 0),
+	priced("solo", "only", 2, 8),
+];
+
+describe("the most expensive model of its provider needs the grant", () => {
+	it("marks each provider's top price, groups an aggregator by vendor, and skips a free or lone row", async () => {
+		const { spawnTier } = await import(`../src/agent-profile/spawn-grant.ts?t=${Math.random()}`);
+		const ctx = makeCtx(next("session"), null, makeAuthStorage(), [], { model: HAIKU, listModels: CATALOG });
+		const tier = (pattern: string) => spawnTier(ctx, pattern, []).expensive;
+		for (const pattern of [
+			"deepseek/deepseek-v4-pro",
+			"deepseek-alt/deepseek-v4-pro",
+			"moonshot/kimi-k3",
+			"zai/glm-5.2",
+			"zai/glm-5.3",
+			"openrouter/moonshotai/kimi-k3",
+			"openrouter/openai/gpt-5.5-pro",
+			"anthropic/claude-opus-5-5",
+		]) {
+			expect([pattern, tier(pattern)]).toEqual([pattern, true]);
+		}
+		for (const pattern of [
+			"deepseek/deepseek-flash:xhigh",
+			"moonshot/kimi-k2.7-code",
+			"zai/glm-5-flash",
+			"openrouter/moonshotai/kimi-k2.7-code",
+			"anthropic/claude-haiku-4-5:max",
+			"local/a",
+			"solo/only",
+		]) {
+			expect([pattern, tier(pattern)]).toEqual([pattern, false]);
+		}
+		expect(spawnTier(ctx, "moonshot/kimi-k3", []).why).toBe("the most expensive model of moonshot");
 	});
 });
 

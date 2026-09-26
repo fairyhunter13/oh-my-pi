@@ -3,19 +3,20 @@
 // internal/policy/ompjs), which was itself already written against these session shapes
 // (tools/ask.ts:1061-1069, :1139), so isChild/grant/countOf below carry over unchanged.
 //
-// Beyond that port, this file adds a tier: up to 3 CHEAP subagents in one user turn spend no
-// grant at all (FREE_SPAWNS). A 4th cheap one, or any expensive one (a high/xhigh/max thinking
-// level, a named flagship model, a model priced at or above the cheapest Opus, or a
-// pay-per-token credential), needs the same grant the old code always required. The grant and
-// the free count both reset at the next user prompt, since both are keyed off the same window.
-import type { CredentialSummary, Message, Model, ToolCall } from "@oh-my-pi/pi-ai";
+// Beyond that port, this file adds a tier: up to 4 CHEAP subagents in one user turn spend no
+// grant at all (FREE_SPAWNS). A 5th cheap one, or any expensive one, needs the same grant the
+// old code always required. Only the model decides the tier (Hafiz, 2026-09-26): a named
+// flagship, a model priced at or above the cheapest Opus, or its provider's most expensive
+// model. A thinking level and a pay-per-token key do not. The grant and the free count both
+// reset at the next user prompt, since both are keyed off the same window.
+import type { Message, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import type { ExtensionContext } from "../extensibility/extensions";
 import type { SessionEntry, SessionMessageEntry } from "../session/session-entries";
 
 export const grantOff = (): boolean => process.env.CCW_SPAWN_GRANT === "off";
 const GRANT_ID = "subagents";
 const ANSWER = /^(?:approve\s+)?(\d+)\b/i;
-export const FREE_SPAWNS = 3;
+export const FREE_SPAWNS = 4;
 
 export const REFUSE_CHILD =
 	"Subagent spawn refused: a subagent never spawns a subagent. Do the work inline, or return what you have to the parent.";
@@ -26,7 +27,9 @@ export const ASK_TAIL =
 	"another count. A grant ends at the next user prompt.";
 
 export const refuseOver = (requested: number, left: number): string =>
-	"Subagent spawn refused: more than 3 subagents in one user turn need a user-confirmed grant (requested " +
+	"Subagent spawn refused: more than " +
+	FREE_SPAWNS +
+	" subagents in one user turn need a user-confirmed grant (requested " +
 	requested +
 	", left " +
 	Math.max(left, 0) +
@@ -165,27 +168,29 @@ const promptKey = (ctx: ExtensionContext): string => {
 	return session + "\0";
 };
 
+const price = (m: Model): number => (m.cost ? m.cost.input + m.cost.output : 0);
+
+// An aggregator such as openrouter lists many vendors, so its group is the vendor prefix of the id.
+const groupOf = (m: Pick<Model, "provider" | "id">): string =>
+	m.id.includes("/") ? m.provider + "/" + m.id.slice(0, m.id.indexOf("/")) : m.provider;
+
 /**
- * Classifies one spawn as cheap or expensive, in the order the plan fixes: thinking level, a
- * named flagship model, catalog price at or above the cheapest Opus, then a pay-per-token
- * credential. `pattern` is `provider/id[:level]`; an empty pattern falls back to the parent
- * session's own current model, and a session with no current model fails closed (expensive).
+ * Classifies one spawn by its model alone: a named flagship, a catalog price at or above the
+ * cheapest Opus, or the most expensive model of its provider. `pattern` is
+ * `provider/id[:level]`; an empty pattern falls back to the parent session's own current model,
+ * and a session with no current model fails closed (expensive).
  */
 export function spawnTier(
 	ctx: ExtensionContext,
-	agent: string,
 	pattern: string,
-	binding: Record<string, unknown> | null,
 	expensiveModels: RegExp[],
 ): { expensive: boolean; why: string } {
 	let providerId = "";
 	let modelId = "";
-	let level = "";
 	const parsed = /^([^/]+)\/([^:]+)(?::(.+))?$/.exec(pattern);
 	if (parsed) {
 		providerId = parsed[1];
 		modelId = parsed[2];
-		level = parsed[3] || "";
 	} else {
 		const current = ctx.model;
 		if (!current) {
@@ -195,18 +200,12 @@ export function spawnTier(
 		modelId = current.id;
 	}
 
-	// 1. thinking level.
-	if (level === "high" || level === "xhigh" || level === "max") {
-		return { expensive: true, why: "thinking level " + level };
-	}
-
-	// 2. a named flagship model.
+	// 1. a named flagship model.
 	const combined = providerId + "/" + modelId;
 	if (expensiveModels.some(re => re.test(modelId) || re.test(combined))) {
 		return { expensive: true, why: "expensive model" };
 	}
 
-	// 3. priced at or above the cheapest current Opus.
 	let listed: Model[] = [];
 	try {
 		listed = ctx.models.list() || [];
@@ -214,35 +213,25 @@ export function spawnTier(
 		listed = [];
 	}
 	const model = listed.find(m => m.provider === providerId && m.id === modelId);
+	if (!model || price(model) <= 0) {
+		return { expensive: false, why: "" };
+	}
+
+	// 2. priced at or above the cheapest current Opus.
 	const opusRefs = listed
 		.filter(m => m.provider === "anthropic" && /claude-opus/i.test(m.id) && m.cost && m.cost.output > 0)
 		.sort((a, b) => a.cost.output - b.cost.output);
 	const ref = opusRefs[0];
-	if (model && model.cost && ref && (model.cost.input >= ref.cost.input || model.cost.output >= ref.cost.output)) {
+	if (ref && (model.cost.input >= ref.cost.input || model.cost.output >= ref.cost.output)) {
 		return { expensive: true, why: "priced at or above Opus" };
 	}
 
-	// 4. pay-per-token: the pinned credential is an API key, or (with no pin) the provider has
-	// no usable OAuth row -- the case an env-only provider such as deepseek or moonshot is
-	// always in, since it stores no credential row at all.
-	let rows: CredentialSummary[] = [];
-	try {
-		rows = ctx.modelRegistry.authStorage.listCredentials(providerId) || [];
-	} catch {
-		rows = [];
-	}
-	const credentials =
-		binding && typeof binding.credentials === "object" && binding.credentials !== null
-			? (binding.credentials as Record<string, unknown>)
-			: undefined;
-	const pinnedId = credentials ? credentials[providerId] : undefined;
-	if (typeof pinnedId === "number") {
-		const pinned = rows.find(row => row.id === pinnedId);
-		if (pinned && pinned.kind === "api_key") {
-			return { expensive: true, why: "pay-per-token key" };
-		}
-	} else if (!rows.some(row => !row.disabled && row.kind === "oauth")) {
-		return { expensive: true, why: "pay-per-token key" };
+	// 3. the most expensive model of its provider. A lone priced model is the top of nothing,
+	// so a group needs two; rule 2 still catches a lone model priced like Opus.
+	const group = groupOf(model);
+	const peers = listed.filter(m => groupOf(m) === group && price(m) > 0);
+	if (peers.length >= 2 && peers.every(m => price(m) <= price(model))) {
+		return { expensive: true, why: "the most expensive model of " + group };
 	}
 
 	return { expensive: false, why: "" };
@@ -256,7 +245,6 @@ export function spendSpawn(
 	ctx: ExtensionContext,
 	agent: string,
 	pattern: string,
-	binding: Record<string, unknown> | null,
 	expensiveModels: RegExp[],
 ): { block: true; reason: string } | undefined {
 	if (grantOff()) {
@@ -266,7 +254,7 @@ export function spendSpawn(
 		if (isChild(ctx)) {
 			return { block: true, reason: REFUSE_CHILD };
 		}
-		const { expensive, why } = spawnTier(ctx, agent, pattern, binding, expensiveModels);
+		const { expensive, why } = spawnTier(ctx, pattern, expensiveModels);
 		const key = promptKey(ctx);
 		const usedFree = FREE.get(key) || 0;
 		if (!expensive && usedFree < FREE_SPAWNS) {
@@ -292,7 +280,6 @@ export function spendSpawn(
 export interface SpawnCandidate {
 	agent: string;
 	pattern: string;
-	binding: Record<string, unknown> | null;
 }
 
 /**
@@ -317,8 +304,8 @@ export function spawnGrantPreCheck(
 		let expensiveCount = 0;
 		let cheapCount = 0;
 		let firstExpensive: { agent: string; pattern: string; why: string } | undefined;
-		for (const { agent, pattern, binding } of candidates) {
-			const { expensive, why } = spawnTier(ctx, agent, pattern, binding, expensiveModels);
+		for (const { agent, pattern } of candidates) {
+			const { expensive, why } = spawnTier(ctx, pattern, expensiveModels);
 			if (expensive) {
 				expensiveCount++;
 				firstExpensive ??= { agent, pattern, why };
