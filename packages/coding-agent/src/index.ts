@@ -16,8 +16,6 @@ export * from "./config/prompt-templates";
 export type { SkillsSettings } from "./extensibility/settings";
 export type { RetrySettings } from "./session/settings";
 export { Settings, settings } from "./config/settings";
-// Typed setting handle by id: extensions reach settings through this since Settings dropped get(path).
-export { lookup as lookupSetting } from "./config/registry";
 // Custom commands
 export type * from "./extensibility/custom-commands/types";
 // Custom tools
