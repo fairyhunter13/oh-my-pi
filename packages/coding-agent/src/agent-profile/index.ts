@@ -1925,7 +1925,7 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 				ctx.ui.notify(
 					"No usable model for " +
 						unusable.join("; ") +
-						". This fork would run those agents on the parent's model; ccw-agent-profile refuses them " +
+						". omp would run those agents on the parent's model; ccw-agent-profile refuses them " +
 						"instead. Check with: omp token <provider> --list",
 					"error",
 				);
@@ -2208,7 +2208,7 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 				binding.pattern +
 				", got " +
 				actual +
-				". This fork runs a child on the parent's model " +
+				". omp runs a child on the parent's model " +
 				"when the bound one has no working credential, and a model the caller names beats the profile"
 			);
 		}
@@ -2851,11 +2851,9 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 				}
 			}
 			lines.push(
-				SPAWNS_SEEN > 0
-					? "enforcement: the spawn hook checked " +
-							SPAWNS_SEEN +
-							" spawn(s); the request guard checks every bound child"
-					: "enforcement: no spawn hook event yet (a pre-18.2.11-shaped host has none); the request guard checks every bound child",
+				"enforcement: the spawn hook checked " +
+					SPAWNS_SEEN +
+					" spawn(s); the request guard checks every bound child",
 			);
 		} else {
 			lines.push("  (none -- each agent uses its own model)");
@@ -3371,7 +3369,7 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 		"per agent and per field, so mine above runs task on tiered's model and level with the\n" +
 		"account added. disabled replaces the parent's list when present. A cycle or an unknown\n" +
 		"name makes the profile unusable. new and edit write every row out, with no extends.\n" +
-		"Every credential lives in this fork's own store, and /providers → Credentials lists, names,\n" +
+		"Every credential lives in omp's own store, and /providers → Credentials lists, names,\n" +
 		"adds and removes them: each OAuth subscription and each API key of any provider. An\n" +
 		"account selector names one of those rows: its label (any case), its email, #<id>, or\n" +
 		"<provider>/<id>.\n" +
@@ -3412,7 +3410,7 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 		"omit it to inherit. disabled, beside the agents, lists agents the profile never spawns.\n" +
 		"Enforcement is strict. A bound agent runs on its bound model, level and account, or it\n" +
 		"does not run: the spawn hook refuses the spawn, and the request guard refuses the\n" +
-		"request inside the child, where this fork would otherwise fall back to the parent's\n" +
+		"request inside the child, where omp would otherwise fall back to the parent's\n" +
 		"model or another account.\n" +
 		"While a profile is applied, an agent it has no row for is refused at spawn too, and the\n" +
 		"refusal names the file to add the row to. An account is enforced only where a profile\n" +
@@ -3458,7 +3456,7 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 		"A repo's own agent is not listed under a profile: set it with scope=repo or scope=repo-shared,\n" +
 		"or edit this repo's local file directly. Nothing is written before Save, and the one-binding\n" +
 		"rule runs on every row then, so a refused row never reaches disk.\n" +
-		"/agents is this fork's own hub for the same rows. While a profile is applied, an /agents edit\n" +
+		"/agents is omp's own hub for the same rows. While a profile is applied, an /agents edit\n" +
 		"writes one row into it, at the layer that already wins for that agent, and a per-agent\n" +
 		"entry found in " +
 		GENERATED_CONFIG +
