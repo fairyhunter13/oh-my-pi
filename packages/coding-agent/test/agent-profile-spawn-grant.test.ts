@@ -167,7 +167,7 @@ const call = (s: Session, tasks: Record<string, unknown>[]) =>
 		),
 	);
 
-const NONE = "(requested 1, left 0)";
+const NONE = "(requested 1, grant slots left 0)";
 const HAIKU_LOW = "anthropic/claude-haiku-4-5:low";
 
 describe("the grant, ported: a spawn on the parent's Opus always needs it", () => {
@@ -181,7 +181,7 @@ describe("the grant, ported: a spawn on the parent's Opus always needs it", () =
 		const s = await session([user("go"), ...approve(2)]);
 		const wide = call(s, [{}, {}, {}]);
 		expect(wide).toContain("expensive subagent");
-		expect(wide).toContain("left 2)");
+		expect(wide).toContain("grant slots left 2)");
 		expect([call(s, [{}, {}]), spawn(s), spawn(s), spawn(s)]).toEqual([
 			"allow",
 			"allow",

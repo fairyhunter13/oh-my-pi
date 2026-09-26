@@ -31,7 +31,7 @@ export const refuseOver = (requested: number, left: number): string =>
 	FREE_SPAWNS +
 	" subagents in one user turn need a user-confirmed grant (requested " +
 	requested +
-	", left " +
+	", grant slots left " +
 	Math.max(left, 0) +
 	"). " +
 	ASK_TAIL;
@@ -43,7 +43,7 @@ export const refuseExpensive = (agent: string, pattern: string, why: string, lef
 	pattern +
 	" (" +
 	why +
-	"), and an expensive subagent needs a user-confirmed grant (requested 1, left " +
+	"), and an expensive subagent needs a user-confirmed grant (requested 1, grant slots left " +
 	Math.max(left, 0) +
 	"). " +
 	ASK_TAIL;
