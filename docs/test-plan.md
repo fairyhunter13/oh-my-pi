@@ -41,6 +41,8 @@ Named exclusion: upstream behavior that these commits do not touch. Upstream's o
 |D-MCP|omp speaks MCP 2026-07-28 and answers roots inline: `claude-code-workflows/knowledge/defects/omp-reached-coderag-with-no-roots.md`|
 |D-SHELL|the shell snapshot keeps the private helpers an rc calls|
 |D-STATS|stats count each provider request once, per credential|
+|D-B|rules B-1 to B-8: a bound subagent runs its row's model, level and account, or is refused|
+|D-G|rules G-1 to G-4 and the repo layers: which file binds an agent, and in what order|
 
 S-07 and S-16 cite D-C1, because the rule set names no separate rule for an identity check or a
 schema version.
@@ -217,6 +219,16 @@ Scenario: S-17 the session list reads the current sessions directory
   And the system holds that no row from the old directory is returned
 ```
 
+### S-18: the built-in agent profile binds every subagent
+
+```gherkin
+Scenario: S-18 the built-in agent profile binds every subagent
+  Given agent-profiles.builtin.yml with a default profile, and a session with no other choice
+  When a subagent spawns, in the parent or in a task child
+  Then the child runs its row's model and level on the row's account, or the spawn is refused with the reason
+  And the system holds that with no builtin file no default applies and nothing is refused
+```
+
 ## Cases
 
 | ID | Title | S-nn | D-nn covered | Status | Test node ID | Risk | Tier |
@@ -261,6 +273,15 @@ Scenario: S-17 the session list reads the current sessions directory
 | T-38 | a v8 auth db migrates to v9 | S-16 | D-C1 | done | `packages/ai/test/auth-storage-schema-v9.test.ts` | 12 | E1 |
 | T-39 | an unsynced on-disk session is listed from the current sessions directory | S-17 | D-STATS | done | `packages/stats/test/trace-builder.test.ts` | 12 | E1 |
 | T-40 | ctrl+k hands the mapping to /agent-profile set (rule set §6 row 12) | S-11 | D-H | done | `packages/tui/test/agents-hub.test.ts` | 12 | E1 |
+| T-41 | defaults, a missing builtin file, and a custom profile over a built-in | S-18 | D-B | done | `packages/coding-agent/test/agent-profile-defaults.test.ts` | 20 | E1 |
+| T-42 | spawn preflight, child pin and request guard (B1-B8, E1, A1, A2) | S-18 | D-B | done | `packages/coding-agent/test/agent-profile-binding.test.ts` | 20 | E1 |
+| T-43 | the /agents hub edits the applied mapping (H1-H6, K1, M1) | S-18 | D-H | done | `packages/coding-agent/test/agent-profile-hub.test.ts` | 12 | E1 |
+| T-44 | resume, branch and credential events (C2-C6, G1, G4) | S-18 | D-B, D-C6 | done | `packages/coding-agent/test/agent-profile-lifecycle.test.ts` | 12 | E1 |
+| T-45 | repo overlay, model mentions and a three-credential batch (R1-R8, A3, m1-m4) | S-18 | D-G | done | `packages/coding-agent/test/agent-profile-repo.test.ts` | 12 | E1 |
+| T-46 | the assign layers and the one-binding rule (L1-L6, K5) | S-18 | D-G | done | `packages/coding-agent/test/agent-profile-assign.test.ts` | 12 | E1 |
+| T-47 | the table editor (L7) | S-18 | D-H | done | `packages/coding-agent/test/agent-profile-wizard.test.ts` | 12 | E1 |
+| T-48 | repo scope discovery (H2-H5, G-1, K5f, L4b-d) | S-18 | D-G | done | `packages/coding-agent/test/agent-profile-scope.test.ts` | 12 | E1 |
+| T-49 | a task child binds the built-in extension too | S-18 | D-B | done | `packages/coding-agent/test/agent-profile-child-propagation.test.ts` | 20 | E1 |
 
 The node ID is the test file path, because bun has no collect-only listing.
 
