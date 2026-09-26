@@ -18,7 +18,8 @@ D-nn names the rule or concept the case defends; the D table lists them.
 Under test: the commits on branch `ccw` over the upstream release tag. They cover the credential
 catalog and pins, the selector grammar and pickers, the agents hub, MCP 2026-07-28, the shell
 snapshot and the stats credential filter, plus two stats fixes: the sync order and the disk-roots
-memo.
+memo. Since 2026-09-26 they also carry the spawn grant, the mailbox and the credential deadlines
+that ccw used to generate.
 
 Named exclusion: upstream behavior that these commits do not touch. Upstream's own suite covers it.
 
@@ -43,6 +44,10 @@ Named exclusion: upstream behavior that these commits do not touch. Upstream's o
 |D-STATS|stats count each provider request once, per credential|
 |D-B|rules B-1 to B-8: a bound subagent runs its row's model, level and account, or is refused|
 |D-G|rules G-1 to G-4 and the repo layers: which file binds an agent, and in what order|
+|D-GRANT|`claude-code-workflows/knowledge/decisions/a-subagent-spawns-only-on-a-user-confirmed-count.md`: 3 cheap spawns per user prompt are free, the rest spend a user-confirmed grant|
+|D-MAIL|`claude-code-workflows/knowledge/decisions/sessions-mail-each-other-through-a-private-maildir.md`|
+|D-DEADLINE|`claude-code-workflows/knowledge/decisions/an-account-picker-is-provider-generic-but-its-deadlines-are-not.md`: the three deadline tiers|
+|D-JEV|`claude-code-workflows/knowledge/decisions/jev-is-spent-only-where-the-evidence-leaves-a-decision-open.md`|
 
 S-07 and S-16 cite D-C1, because the rule set names no separate rule for an identity check or a
 schema version.
@@ -229,6 +234,56 @@ Scenario: S-18 the built-in agent profile binds every subagent
   And the system holds that with no builtin file no default applies and nothing is refused
 ```
 
+### S-19: every mapping layer takes every thinking level
+
+```gherkin
+Scenario: S-19 every mapping layer takes every thinking level
+  Given a row at off, an effort from core, or auto, in a hand profile, a tracked repo file, a local repo file or assign
+  When the profile applies
+  Then the agent binds at that level with no complaint, a user-level custom agent included
+  And the system holds that an auto row warns while the judge role resolves to typesafe
+```
+
+### S-20: a spawn spends the grant by its tier
+
+```gherkin
+Scenario: S-20 a spawn spends the grant by its tier
+  Given a user prompt, a grant or none, and each task's own binding
+  When the session spawns subagents
+  Then 3 cheap spawns run free, and a fourth or an expensive one spends the grant or is refused before it starts
+  And the system holds that a new user prompt refills the free 3 and a subagent never spawns
+```
+
+### S-21: the built-in mailbox delivers only safe mail
+
+```gherkin
+Scenario: S-21 the built-in mailbox delivers only safe mail
+  Given two top-level sessions on one machine
+  When one sends mail to the other
+  Then the mail arrives as an agent message, and a forged, oversized, symlinked or too-deep mail is rejected
+  And the system holds that a subagent opens no mailbox
+```
+
+### S-22: deadlines come from omp and never refresh
+
+```gherkin
+Scenario: S-22 deadlines come from omp and never refresh
+  Given OAuth rows of an anthropic, a no-refresh and a rotating provider
+  When `omp auth-broker deadlines --json` runs
+  Then anthropic rows carry authorizedAt plus the grant TTL, no-refresh rows their expiry, rotating rows null
+  And the system holds that no token is resolved and an empty store prints []
+```
+
+### S-23: ccw's credential checks run as fork tests
+
+```gherkin
+Scenario: S-23 ccw's credential checks run as fork tests
+  Given the 21 checks that ccw's selftest held
+  When the fork's own test runner runs them
+  Then each passes under its old title
+  And the system holds that ccw's selftest runs this file on every apply
+```
+
 ## Cases
 
 | ID | Title | S-nn | D-nn covered | Status | Test node ID | Risk | Tier |
@@ -282,6 +337,11 @@ Scenario: S-18 the built-in agent profile binds every subagent
 | T-47 | the table editor (L7) | S-18 | D-H | done | `packages/coding-agent/test/agent-profile-wizard.test.ts` | 12 | E1 |
 | T-48 | repo scope discovery (H2-H5, G-1, K5f, L4b-d) | S-18 | D-G | done | `packages/coding-agent/test/agent-profile-scope.test.ts` | 12 | E1 |
 | T-49 | a task child binds the built-in extension too | S-18 | D-B | done | `packages/coding-agent/test/agent-profile-child-propagation.test.ts` | 20 | E1 |
+| T-50 | every thinking level binds in every layer, and an auto row warns on a typesafe judge | S-19 | D-G, D-JEV | done | `packages/coding-agent/test/agent-profile-thinking.test.ts` | 12 | E1 |
+| T-51 | 3 cheap spawns are free, an expensive one or a fourth spends the grant | S-20 | D-GRANT | done | `packages/coding-agent/test/agent-profile-spawn-grant.test.ts` | 20 | E1 |
+| T-52 | the built-in mailbox delivers only safe mail as agent messages | S-21 | D-MAIL | done | `packages/coding-agent/test/mailbox-extension.test.ts` | 20 | E1 |
+| T-53 | deadlines per basis, a disabled cause, a rotating provider and an empty store | S-22 | D-DEADLINE | done | `packages/coding-agent/test/auth-broker-deadlines.test.ts` | 12 | E1 |
+| T-54 | ccw's 21 credential checks, under their selftest titles | S-23 | D-C1, D-B5, D-C6 | done | `packages/ai/test/ccw-credentials.test.ts` | 20 | E1 |
 
 The node ID is the test file path, because bun has no collect-only listing.
 
