@@ -33,6 +33,10 @@ export interface CredentialSummary {
 	active: boolean;
 	/** This session has an explicit pin on this row. */
 	pinned: boolean;
+	/** oauth: unix ms the grant was first authorized (`data.authorizedAt`). Absent otherwise. */
+	authorizedAt?: number | null;
+	/** oauth: unix ms the current access token expires (`data.expires`). Absent otherwise. */
+	expires?: number | null;
 }
 
 /** Raw catalog row: every column the summary needs, disabled rows included, tombstones left out. */
@@ -253,6 +257,7 @@ export function summarizeCredentialRow(
 		// An unparsable payload still lists, without identity or hint.
 	}
 	const text = (value: unknown): string | null => (typeof value === "string" && value.trim() ? value.trim() : null);
+	const num = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
 	const kind = row.credential_type === "api_key" ? "api_key" : "oauth";
 	const key = kind === "api_key" ? text(data.key) : null;
 	return {
@@ -280,6 +285,8 @@ export function summarizeCredentialRow(
 		isDefault: row.is_default === 1,
 		active: marks.activeId === row.id,
 		pinned: marks.pinnedId === row.id,
+		authorizedAt: kind === "oauth" ? num(data.authorizedAt) : null,
+		expires: kind === "oauth" ? num(data.expires) : null,
 	};
 }
 

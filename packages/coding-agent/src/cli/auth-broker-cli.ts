@@ -24,12 +24,14 @@ import {
 	type CredentialSummary,
 	getEnvApiKey,
 	getOAuthProviders,
+	getProviderDefinition,
 	listProvidersWithEnvKey,
 	type OAuthCredential,
 	type OAuthProvider,
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
+import { ANTHROPIC_OAUTH_GRANT_TTL_MS } from "@oh-my-pi/pi-ai/oauth/anthropic-constants";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import { isDefinitiveOAuthFailure } from "@oh-my-pi/pi-ai/error";
@@ -55,7 +57,8 @@ export type AuthBrokerAction =
 	| "status"
 	| "import"
 	| "migrate"
-	| "list";
+	| "list"
+	| "deadlines";
 
 export interface AuthBrokerCommandArgs {
 	action: AuthBrokerAction;
@@ -97,6 +100,7 @@ const ACTIONS: readonly AuthBrokerAction[] = [
 	"migrate",
 	"status",
 	"list",
+	"deadlines",
 ];
 
 /** Callback ports baked from the per-provider OAuth flow modules. */
@@ -345,7 +349,9 @@ async function runRefresh(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 				);
 			}
 			if (result.refreshed.length === 0 && result.failed.length === 0 && result.skipped.length === 0) {
-				const stored = authStorage.listCredentials(provider).filter(row => row.kind === "oauth" && !row.disabled).length;
+				const stored = authStorage
+					.listCredentials(provider)
+					.filter(row => row.kind === "oauth" && !row.disabled).length;
 				const scope = provider ? ` for ${provider}` : "";
 				process.stdout.write(
 					stored === 0
@@ -546,6 +552,49 @@ async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	process.stdout.write("Available providers:\n\n");
 	for (const p of providers) {
 		process.stdout.write(`  ${p.id.padEnd(20)} ${p.name}\n`);
+	}
+}
+
+/**
+ * One OAuth credential's re-login deadline, read-only and never a refresh: `AuthStorage.create` plus
+ * `listCredentials` alone touch nothing on disk. Ledger for `ccw`'s 6-hourly renewal sweep, which used to
+ * run its own SQL against `agent.db` (`internal/hostcli/authrefresh_omp.go`) and broke silently on any
+ * schema or constant drift. This is the one place that decides a deadline, so ccw only has to print it.
+ *
+ * `basis` is derived, never hand-listed: `grant-ttl` is the one absolute lifetime the tree encodes
+ * (`ANTHROPIC_OAUTH_GRANT_TTL_MS`), and `no-refresh` is any OAuth provider whose compiled auth rule
+ * defines no `refreshToken` (`refresh "none"` in its `.kdl`, e.g. zai, devin, muse-code, perplexity) --
+ * so a new such provider is covered the day its rule lands, with no second list to keep in sync.
+ */
+function deadlineForRow(row: CredentialSummary): { reloginBy: number; basis: "grant-ttl" | "no-refresh" } | null {
+	if (row.disabled) return null; // A disabled row's remedy is a login now, not a countdown.
+	if (row.provider === "anthropic" && typeof row.authorizedAt === "number") {
+		return { reloginBy: row.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS, basis: "grant-ttl" };
+	}
+	if (typeof row.expires === "number" && !getProviderDefinition(row.provider)?.refreshToken) {
+		return { reloginBy: row.expires, basis: "no-refresh" };
+	}
+	return null;
+}
+
+async function runDeadlines(_flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	const authStorage = await AuthStorage.create(getAgentDbPath());
+	try {
+		const rows = authStorage.listCredentials().filter(row => row.kind === "oauth");
+		const out = rows.map(row => {
+			const deadline = deadlineForRow(row);
+			const entry: Record<string, unknown> = { id: row.id, provider: row.provider };
+			if (row.label) entry.label = row.label;
+			if (row.identity) entry.email = row.identity;
+			if (row.org) entry.orgName = row.org;
+			if (row.disabled) entry.disabledCause = row.disabled;
+			entry.reloginBy = deadline?.reloginBy ?? null;
+			entry.basis = deadline?.basis ?? null;
+			return entry;
+		});
+		process.stdout.write(`${JSON.stringify(out)}\n`);
+	} finally {
+		authStorage.close();
 	}
 }
 
@@ -1057,6 +1106,9 @@ export async function runAuthBrokerCommand(cmd: AuthBrokerCommandArgs): Promise<
 			return;
 		case "list":
 			await runList(cmd.flags);
+			return;
+		case "deadlines":
+			await runDeadlines(cmd.flags);
 			return;
 		default: {
 			// Exhaustive check.
