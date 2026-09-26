@@ -3,6 +3,10 @@
 // shapes; only the model catalog and the auth store are fakes, matching the original.
 import type { ExtensionAPI, ExtensionContext } from "../../src/extensibility/extensions";
 
+// The mapping tests grade routing, not the spend grant, so the grant is off unless a test turns
+// it on. agent-profile-spawn-grant.test.ts does, and restores this default after each case.
+process.env.CCW_SPAWN_GRANT = "off";
+
 // One agent file, in the frontmatter shape this fork parses.
 export const agentFile = (name: string, description: string): string =>
 	"---\nname: " + name + "\ndescription: " + description + "\n---\nBody.\n";
@@ -47,42 +51,50 @@ export const CREDENTIALS = [
 	apiKey(12, "deepseek", "…c3d4", { label: "spare" }),
 ];
 
+// cost is $/1M tokens, the shape spawn-grant.ts's rule 3 reads (agent-profile-spawn-grant.test.ts).
 export const DEEPSEEK = {
 	provider: "deepseek",
 	id: "deepseek-flash",
 	name: "DeepSeek Flash",
 	reasoning: true,
 	thinking: { mode: "effort", efforts: ["high", "xhigh"] },
+	cost: { input: 0.5, output: 1.5, cacheRead: 0, cacheWrite: 0 },
 };
 export const OPUS = {
 	provider: "anthropic",
 	id: "claude-opus-5",
 	reasoning: true,
 	thinking: { mode: "anthropic-adaptive", efforts: ["low", "medium", "high", "xhigh", "max"] },
+	cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 },
 };
+// The cheapest current Opus (Findings): $4/$20. spawn-grant.ts's rule 3 reference model.
 export const OPUS55 = {
 	provider: "anthropic",
 	id: "claude-opus-5-5",
 	reasoning: true,
 	thinking: { mode: "anthropic-adaptive", efforts: ["low", "medium", "high", "xhigh", "max"] },
+	cost: { input: 4, output: 20, cacheRead: 0, cacheWrite: 0 },
 };
 export const HAIKU = {
 	provider: "anthropic",
 	id: "claude-haiku-4-5",
 	reasoning: true,
 	thinking: { mode: "budget", efforts: ["minimal", "low", "medium", "high", "xhigh"] },
+	cost: { input: 0.25, output: 1.25, cacheRead: 0, cacheWrite: 0 },
 };
 export const SONNET = {
 	provider: "anthropic",
 	id: "claude-sonnet-5",
 	reasoning: true,
 	thinking: { mode: "anthropic-adaptive", efforts: ["low", "medium", "high", "xhigh", "max"] },
+	cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
 };
 export const CODEX = {
 	provider: "openai-codex",
 	id: "gpt-5",
 	reasoning: true,
 	thinking: { mode: "effort", efforts: ["low", "medium", "high", "xhigh"] },
+	cost: { input: 2, output: 10, cacheRead: 0, cacheWrite: 0 },
 };
 export const MODELS = [DEEPSEEK, OPUS, OPUS55, HAIKU, SONNET, CODEX];
 
@@ -208,6 +220,9 @@ export interface FakeCtxOptions {
 	entries?: unknown[];
 	branch?: unknown[];
 	authStorage?: FakeAuthStorage;
+	// Overrides ctx.models.resolve entirely; needed for a role alias ("@judge"), which the
+	// default lookup below (a plain id/provider match) does not understand.
+	resolve?: (pattern: string) => unknown;
 }
 
 // The shape before_subagent_spawn hands the hook.
@@ -267,6 +282,9 @@ export const makeCtx = (
 		},
 		models: {
 			resolve: (pattern: string) => {
+				if (options.resolve) {
+					return options.resolve(pattern);
+				}
 				const base = String(pattern).split(":")[0];
 				if (!base.includes("/")) {
 					return MODELS.find(model => model.id.includes(base));

@@ -353,6 +353,7 @@ describe("K5: the one-binding rule refuses a row rather than half-binding it", (
 				id: "deepseek-flash",
 				reasoning: true,
 				thinking: { mode: "effort", efforts: ["high", "xhigh"] },
+				cost: { input: 0.5, output: 1.5, cacheRead: 0, cacheWrite: 0 },
 			},
 		});
 		// A fresh module instance has no APPLIED_PROFILE, so re-apply tiered in it first.

@@ -70,6 +70,13 @@ import { dirname, join, resolve } from "node:path";
 import { lookup as lookupSetting } from "../config/registry";
 import { settings } from "../config/settings";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions";
+import { DEFAULT_SPAWN_AGENT } from "../task/spawn-policy";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { spawnGrantPreCheck, spendSpawn } from "./spawn-grant";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { formatModelRoleAlias } from "../config/model-roles";
 
 // This fork's own agent dir: PI_CODING_AGENT_DIR moves it, so a sandbox never reads the real
 // files.
@@ -457,14 +464,14 @@ let MENTION_ROWS: Record<string, any> = {};
 // The eight levels a model pattern suffix accepts: the six efforts, plus off and auto.
 // "inherit" is deliberately absent -- parseCliThinkingLevel rejects it and an omitted key
 // already means inherit.
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
+const THINKING_LEVELS = ["off", ...THINKING_EFFORTS, AUTO_THINKING];
 
 // The effort order, least to most.
 const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
-// Copy of getSupportedEfforts (pi-catalog/src/model-thinking.ts).
-const effortsOf = (model: any): string[] =>
-	model && model.reasoning && model.thinking && Array.isArray(model.thinking.efforts) ? model.thinking.efforts : [];
+// getSupportedEfforts (pi-catalog/src/model-thinking.ts) requires a defined model; effortsOf
+// guards the undefined case its call sites need.
+const effortsOf = (model: any): string[] => (model ? [...getSupportedEfforts(model)] : []);
 
 // Copy of clampThinkingLevelForModel: the level a child actually runs. off and auto are not
 // efforts and are never clamped.
@@ -489,6 +496,33 @@ const clampLevel = (efforts: string[], level: string): string | undefined => {
 	return below ?? efforts[0];
 };
 
+const JUDGE_ROLE_ALIAS = formatModelRoleAlias("judge");
+
+// jev is spent only where a decision needs it (knowledge/decisions/jev-is-spent-only-where-
+// the-evidence-leaves-a-decision-open.md). Under thinking: auto, session/model-controls.ts
+// classifies every turn through the judge role, so a row bound to auto spends jev on each
+// child turn once the judge role resolves to typesafe -- with no decision behind any one of
+// them. This warns, but the row still binds: the level still works, and an operator may want
+// the classification anyway.
+const autoThinkingWarning = (ctx: ExtensionContext, agent: string, thinking: unknown): string | null => {
+	if (thinking !== AUTO_THINKING) {
+		return null;
+	}
+	let judge: Model | undefined;
+	try {
+		judge = ctx.models.resolve(JUDGE_ROLE_ALIAS);
+	} catch {
+		judge = undefined;
+	}
+	if (judge?.provider !== "typesafe") {
+		return null;
+	}
+	return (
+		agent +
+		": thinking auto classifies every turn through the judge role (jev). Pick a fixed level to avoid that spend."
+	);
+};
+
 const PROFILES_PREAMBLE = [
 	"# Custom profiles for /agent-profile. Nothing generates this file, so a hand edit",
 	"# survives ccw install --apply. A profile may say extends: <profile> to start from",
@@ -499,7 +533,7 @@ const PROFILES_PREAMBLE = [
 
 // Names no profile may take: off, and the top-level blocks beside profiles:. repos:, accounts:
 // and credentials: are retired blocks, kept here so a leftover one is never read as a profile.
-const RESERVED_NAMES = ["off", "credentials", "accounts", "assign", "repos"];
+const RESERVED_NAMES = ["off", "credentials", "accounts", "assign", "repos", "expensiveModels"];
 
 // assign: in the hand file. Its agent rows lay over whatever profile is applied, and
 // assign.profiles.<name> lays over those. repos and profiles are reserved keys, so neither is
@@ -565,7 +599,9 @@ const spliceBlock = (
 	const bare =
 		root === "profiles" &&
 		rootAt < 0 &&
-		lines.some(line => /^[^\s#][^:]*:/.test(line) && !/^(credentials|repos|assign|accounts):/.test(line));
+		lines.some(
+			line => /^[^\s#][^:]*:/.test(line) && !/^(credentials|repos|assign|accounts|expensiveModels):/.test(line),
+		);
 	const pad = bare ? "" : "  ";
 	// The section is [first, last): the lines under root, up to the next top-level key.
 	let first = lines.length;
@@ -895,6 +931,7 @@ interface BuiltinState {
 	disabled: Record<string, string[]>;
 	sources: Record<string, Record<string, string>>;
 	fleetAgents: string[];
+	expensiveModels: string[];
 }
 
 const EMPTY_BUILTIN: BuiltinState = {
@@ -905,6 +942,7 @@ const EMPTY_BUILTIN: BuiltinState = {
 	disabled: {},
 	sources: {},
 	fleetAgents: [],
+	expensiveModels: [],
 };
 
 let builtinCache: BuiltinState = EMPTY_BUILTIN;
@@ -955,12 +993,51 @@ const loadBuiltin = (): BuiltinState => {
 			sources[name] = Object.fromEntries(Object.keys(profile).map(agent => [agent, "builtin"]));
 		}
 		const fleetAgents = [...new Set(Object.values(normalized).flatMap(map => Object.keys(map)))];
-		builtinCache = { mtimeMs, defaultProfile, descriptions, normalized, disabled, sources, fleetAgents };
+		const expensiveModels = Array.isArray(parsed.expensiveModels)
+			? parsed.expensiveModels.filter((pattern: unknown): pattern is string => typeof pattern === "string")
+			: [];
+		builtinCache = {
+			mtimeMs,
+			defaultProfile,
+			descriptions,
+			normalized,
+			disabled,
+			sources,
+			fleetAgents,
+			expensiveModels,
+		};
 	} catch {
 		// A broken file must not take the extension down: no built-in profiles, no default.
 		builtinCache = { ...EMPTY_BUILTIN, mtimeMs };
 	}
 	return builtinCache;
+};
+
+// The model-id patterns (case-insensitive) that flag a spawn as expensive under spawn-grant.ts's
+// tier rule, from the top-level expensiveModels: key of BUILTIN_FILE and of the hand file
+// PROFILES_FILE. An unparsable pattern is skipped here, and loadCustom reports one in the hand file.
+const loadCustomExpensiveModels = (): string[] => {
+	try {
+		const parsed = (Bun.YAML.parse(readFileSync(PROFILES_FILE, "utf8")) || {}) as Record<string, any>;
+		return Array.isArray(parsed.expensiveModels)
+			? parsed.expensiveModels.filter((pattern: unknown): pattern is string => typeof pattern === "string")
+			: [];
+	} catch {
+		return [];
+	}
+};
+
+export const expensiveModelPatterns = (): RegExp[] => {
+	const raw = new Set([...loadBuiltin().expensiveModels, ...loadCustomExpensiveModels()]);
+	const patterns: RegExp[] = [];
+	for (const pattern of raw) {
+		try {
+			patterns.push(new RegExp(pattern, "i"));
+		} catch {
+			// Skipped: an unparsable pattern must not take spawning down.
+		}
+	}
+	return patterns;
 };
 
 // name -> file for every agent one directory defines, read the way this fork reads it: *.md
@@ -1306,6 +1383,15 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 					);
 				}
 			}
+			for (const pattern of Array.isArray(parsed.expensiveModels) ? parsed.expensiveModels : []) {
+				try {
+					new RegExp(String(pattern), "i");
+				} catch {
+					complaints.push(
+						'expensiveModels: "' + String(pattern) + '" is not a regular expression, so it was skipped',
+					);
+				}
+			}
 			const assign = normalizeAssign(parsed.assign, complaints);
 			cache = {
 				mtimeMs,
@@ -1596,6 +1682,12 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 				const last = complaints[complaints.length - 1] || agent + ": the row was refused";
 				const prefix = agent + ": ";
 				refused.push({ agent, reason: last.startsWith(prefix) ? last.slice(prefix.length) : last });
+			}
+		}
+		for (const [agent, entry] of Object.entries(profile)) {
+			const warning = autoThinkingWarning(ctx, agent, (entry as Record<string, unknown>).thinking);
+			if (warning) {
+				complaints.push(warning);
 			}
 		}
 		return { profile, sources, layers, complaints, root: repo ? repo.root : "", refused };
@@ -2441,7 +2533,7 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 	// reason names the file that binds it. Under off this fork's own resolution holds. An m<N>
 	// agent is a model the user tagged, built as a task clone, so it runs on the tagged model
 	// under task's level and account, and the child guard holds it there.
-	pi.on("before_subagent_spawn", (event, ctx) => {
+	function routeSpawn(event: any, ctx: ExtensionContext): any {
 		SPAWNS_SEEN++;
 		try {
 			const agent = String((event as any).agent || "");
@@ -2547,6 +2639,41 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 				reason: "ccw-agent-profile could not check " + (event as any).agent + ": " + String(error),
 			} as never;
 		}
+	}
+
+	// The tier rule (spawn-grant.ts) needs the model this handler actually resolved, since a
+	// pinned pattern replaces event.patterns. before_subagent_spawn refuses over the applied
+	// profile first; only a spawn the profile allows reaches the spend check.
+	pi.on("before_subagent_spawn", (event, ctx) => {
+		const r = routeSpawn(event, ctx);
+		if (r && (r as any).block) {
+			return r;
+		}
+		const agent = String((event as any).agent || "");
+		const refusal = spendSpawn(
+			ctx,
+			agent,
+			typeof (r as any)?.model === "string" ? (r as any).model : (event.patterns?.[0] ?? ""),
+			bindingOf(ctx, agent),
+			expensiveModelPatterns(),
+		);
+		return refusal ?? r;
+	});
+
+	// A pre-check over the whole batch: refuses before ANY child in it spawns, and spends
+	// nothing itself (before_subagent_spawn above spends per spawn, once each one it allows
+	// actually reaches it).
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "task") {
+			return undefined;
+		}
+		const rawTasks: any[] = Array.isArray((event.input as any)?.tasks) ? (event.input as any).tasks : [];
+		const candidates = (rawTasks.length > 0 ? rawTasks : [{}]).map(task => {
+			const agent = (typeof task?.agent === "string" && task.agent.trim()) || DEFAULT_SPAWN_AGENT;
+			const binding = bindingOf(ctx, agent);
+			return { agent, pattern: binding?.pattern ?? "", binding };
+		});
+		return spawnGrantPreCheck(ctx, candidates, expensiveModelPatterns());
 	});
 
 	// The turn boundary is what survives a credential wipe mid-run. One write per turn, not per
@@ -2829,6 +2956,10 @@ export const createAgentProfileExtension: ExtensionFactory = pi => {
 			}
 			for (const agent of Object.keys(profile).sort()) {
 				lines.push(bindingLine(ctx, agent));
+				const warning = autoThinkingWarning(ctx, agent, (profile[agent] as Record<string, unknown>).thinking);
+				if (warning) {
+					lines.push(warning);
+				}
 			}
 			if (APPLIED_DISABLED.length > 0) {
 				lines.push(disabledLine());
