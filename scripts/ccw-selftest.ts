@@ -41,7 +41,9 @@ function runGlob(glob: string, env: string): void {
 	const tests = new Bun.Glob(glob);
 	const files = [...tests.scanSync({ cwd: root })];
 	assert(files.length > 0, `this tree has no ${glob}`);
-	const run = Bun.spawnSync(["bun", "test", ...files.map(file => `./${file}`)], {
+	// Apply runs this first in a freshly built tree, where a first test or hook took 5.7 to 8.6 s
+	// against bun's 5 s default, and 1.4 s once warm.
+	const run = Bun.spawnSync(["bun", "test", "--timeout", "30000", ...files.map(file => `./${file}`)], {
 		cwd: root,
 		env: { ...process.env, PI_CODING_AGENT_DIR: path.join(tmp, env) },
 	});
