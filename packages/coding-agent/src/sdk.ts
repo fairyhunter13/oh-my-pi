@@ -48,6 +48,7 @@ import {
 } from "./advisor";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
+import { createAgentProfileExtension } from "./agent-profile";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
 import {
@@ -2384,6 +2385,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 
+			// createAgentProfileExtension goes first and counts toward rebindableInlineExtensionCount
+			// below: a task child runs with restrictToolNames, so it never re-enters this block and
+			// instead re-binds only the parent's `preparedExtensions` (bindPreparedExtensions). The
+			// agent-profile spawn guard and request guard must run in every child, so its factory has
+			// to land in that prepared/rebindable set, not only in the parent's own inline list.
+			inlineExtensions.push(createAgentProfileExtension);
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
 			if (customTools.length > 0) {
@@ -2468,7 +2475,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Load inline extensions from factories. Caller-provided factories are safe
 		// to rebind, so preserve them with file-backed prepared extensions for
 		// `/tan` and other child sessions.
-		const rebindableInlineExtensionCount = options.extensions?.length ?? 0;
+		const rebindableInlineExtensionCount = 1 + (options.extensions?.length ?? 0);
 		if (inlineExtensions.length > 0) {
 			for (let i = 0; i < inlineExtensions.length; i++) {
 				const factory = inlineExtensions[i];
